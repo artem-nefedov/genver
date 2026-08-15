@@ -32,6 +32,7 @@ Change "latest" to specific release to pin the version.
 
 - Self-contained statically-linked binary, doesn't rely on other executables
 - Tiny
+- Fast
 - Works only with the specific flow (see below)
 
 ## Supported flow

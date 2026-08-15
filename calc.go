@@ -8,7 +8,6 @@ import (
 
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	cgobject "github.com/go-git/go-git/v5/plumbing/object/commitgraph"
 )
 
 // result is a computed version, split so the --format flag can render
@@ -36,7 +35,6 @@ type boundary struct {
 // calculator holds the state needed to compute a version.
 type calculator struct {
 	g            *repo
-	idx          cgobject.CommitNodeIndex // commit-graph-backed parent lookups
 	boundaries   []boundary
 	boundaryCore map[plumbing.Hash]core // boundary commit hash -> release core
 	tagCore      map[plumbing.Hash]core // commit hash -> core of a tag on it
@@ -48,24 +46,9 @@ func newCalculator(g *repo) (*calculator, error) {
 }
 
 // newCalculatorTrace builds a calculator that logs every calculation step to
-// trace (unless trace is nil), using the commit-graph when available.
+// trace (unless trace is nil).
 func newCalculatorTrace(g *repo, trace io.Writer) (*calculator, error) {
-	return newCalculatorOpts(g, trace, true)
-}
-
-// newCalculatorOpts builds a calculator. When useCommitGraph is false the
-// commit-graph is ignored even if present, forcing the object-store path.
-func newCalculatorOpts(g *repo, trace io.Writer, useCommitGraph bool) (*calculator, error) {
-	idx, usingGraph := g.commitNodeIndex(useCommitGraph)
-	c := &calculator{g: g, idx: idx, trace: trace}
-	switch {
-	case usingGraph:
-		c.logf("using commit-graph for parent lookups (fast path)")
-	case !useCommitGraph:
-		c.logf("commit-graph disabled by --no-commit-graph; decoding commit objects for parent lookups (slow path)")
-	default:
-		c.logf("no commit-graph found; decoding commit objects for parent lookups (slow path)")
-	}
+	c := &calculator{g: g, trace: trace}
 
 	// Cache the tag->core map once; it is consulted repeatedly.
 	tc, err := g.tagCores()
@@ -126,10 +109,9 @@ func short(h plumbing.Hash) string {
 // themselves, so we never walk history for it. The expensive per-untagged-merge
 // core computation (developVersion / directMergeBump, each a history walk) runs
 // only for the typically small set of commits made since the last release —
-// avoiding a quadratic blowup on large, densely tagged repositories, especially
-// on the --no-commit-graph path. When there is no tag at all, the pass covers
-// the whole chain starting from the 0.1.0 root, which is inherently the cost of
-// an untagged repository.
+// avoiding a quadratic blowup on large, densely tagged repositories. When there
+// is no tag at all, the pass covers the whole chain starting from the 0.1.0
+// root, which is inherently the cost of an untagged repository.
 //
 // The repository root is always a boundary (core 0.1.0, or a tag on it).
 // Boundaries are populated into c.boundaries / c.boundaryCore as the pass
@@ -267,11 +249,10 @@ type sectionScan struct {
 // (start is treated as an ordinary commit), yielding the previous section for a
 // start that is itself a boundary.
 func (c *calculator) scanSection(start *object.Commit, excludeStart bool) (sectionScan, error) {
-	// Walk the parent edges reachable from start exactly once (cheap: no commit
-	// objects are decoded when a commit-graph is present). Which boundary is the
-	// base and how many commits sit above it are then answered from this pool in
-	// memory.
-	pool, err := parentPool(c.idx, start.Hash)
+	// Walk the parent edges reachable from start exactly once. Which boundary is
+	// the base and how many commits sit above it are then answered from this pool
+	// in memory.
+	pool, err := c.g.parentPool(start.Hash)
 	if err != nil {
 		return sectionScan{}, err
 	}
@@ -494,7 +475,7 @@ func (c *calculator) directMergeBump(cm *object.Commit) (bumpKind, error) {
 	if err != nil {
 		return bumpNone, err
 	}
-	pool, err := parentPool(c.idx, cm.Hash)
+	pool, err := c.g.parentPool(cm.Hash)
 	if err != nil {
 		return bumpNone, err
 	}
@@ -544,7 +525,7 @@ func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Comm
 	if err != nil {
 		return nil, err
 	}
-	pool, err := parentPool(c.idx, head.Hash)
+	pool, err := c.g.parentPool(head.Hash)
 	if err != nil {
 		return nil, err
 	}
@@ -579,7 +560,7 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, int
 
 	// The fork point is an ancestor of head, so one parent pool walked from head
 	// holds everything both the develop-section scan and the branch count need.
-	pool, err := parentPool(c.idx, head.Hash)
+	pool, err := c.g.parentPool(head.Hash)
 	if err != nil {
 		return core{}, 0, err
 	}

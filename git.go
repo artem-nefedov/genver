@@ -10,9 +10,8 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
-	commitgraph "github.com/go-git/go-git/v5/plumbing/format/commitgraph/v2"
+	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
-	cgobject "github.com/go-git/go-git/v5/plumbing/object/commitgraph"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
 
@@ -32,8 +31,19 @@ func (osFileWriter) WriteFile(name string, data []byte, perm os.FileMode) error 
 // repo wraps a go-git repository with the helpers givi needs. All operations
 // are local; nothing here touches the network.
 type repo struct {
-	r   *git.Repository
-	out fileWriter // persists --write-to output
+	r     *git.Repository
+	out   fileWriter          // persists --write-to output
+	store *filesystem.Storage // non-nil when descriptors are kept open (needs Close)
+}
+
+// Close releases any resources held by the repo. When the storage keeps file
+// descriptors open (KeepDescriptors), this closes the cached packfile handles.
+// It is safe to call on a repo without a tuned store (a no-op).
+func (g *repo) Close() error {
+	if g.store != nil {
+		return g.store.Close()
+	}
+	return nil
 }
 
 // writeOutput writes data to name through the repo's fileWriter.
@@ -42,11 +52,33 @@ func (g *repo) writeOutput(name string, data []byte, perm os.FileMode) error {
 }
 
 func openRepo(path string) (*repo, error) {
-	r, err := git.PlainOpenWithOptions(path, &git.PlainOpenOptions{DetectDotGit: true})
+	// First open normally so go-git performs its .git detection (including
+	// worktree/submodule ".git" files and DetectDotGit walking up parents).
+	base, err := git.PlainOpenWithOptions(path, &git.PlainOpenOptions{DetectDotGit: true})
 	if err != nil {
 		return nil, fmt.Errorf("open git repository: %w", err)
 	}
-	return &repo{r: r, out: osFileWriter{}}, nil
+
+	// go-git's default storage reopens (and closes) the packfile on every single
+	// object read, so decoding thousands of commits/tags spends most of its
+	// wall-clock time in open/close syscalls rather than in useful work. Rebuild
+	// the storage over the already-detected .git filesystem with descriptors kept
+	// open and a large object cache, so the pack is opened once and reused. This
+	// is the single biggest lever on read performance.
+	if fss, ok := base.Storer.(*filesystem.Storage); ok {
+		opts := filesystem.Options{
+			ExclusiveAccess: true, // givi never mutates the repo while reading
+			KeepDescriptors: true, // reuse pack file descriptors across reads
+		}
+		store := filesystem.NewStorageWithOptions(fss.Filesystem(), cache.NewObjectLRU(256*cache.MiByte), opts)
+		r, err := git.Open(store, nil)
+		if err == nil {
+			return &repo{r: r, out: osFileWriter{}, store: store}, nil
+		}
+		// If reopening with tuned options fails for any reason, fall back to the
+		// already-open repository rather than failing outright.
+	}
+	return &repo{r: base, out: osFileWriter{}}, nil
 }
 
 // headBranch returns the short name of the branch HEAD points to. It errors on
@@ -203,32 +235,11 @@ func (g *repo) mergeBase(a, b *object.Commit) (*object.Commit, error) {
 	return bases[0], nil
 }
 
-// commitNodeIndex returns a CommitNodeIndex for the repository. When useGraph is
-// true and a commit-graph file is present, it is used as backing storage so
-// parent hashes can be read without decoding the (compressed) commit objects
-// themselves; the object store is used as a fallback. This is the single biggest
-// lever for speed on large repositories, where the reachability walk dominates.
-// Passing useGraph=false forces the object-store path even if a commit-graph
-// exists. The second return value reports whether a commit-graph is backing the
-// index.
-func (g *repo) commitNodeIndex(useGraph bool) (cgobject.CommitNodeIndex, bool) {
-	if useGraph {
-		if fss, ok := g.r.Storer.(*filesystem.Storage); ok {
-			if idx, err := commitgraph.OpenChainOrFileIndex(fss.Filesystem()); err == nil {
-				return cgobject.NewGraphCommitNodeIndex(idx, g.r.Storer), true
-			}
-		}
-	}
-	return cgobject.NewObjectCommitNodeIndex(g.r.Storer), false
-}
-
 // parentPool returns, for every commit reachable from start (inclusive), its
-// parent hashes. It walks via the commit-node index so that when a commit-graph
-// file exists no commit object is decoded during the walk (only cheap parent
-// pointers are read). This single walk backs every reachability, ancestor-set,
-// and section-counting question, so the expensive full history is loaded at
-// most once and only as parent edges, never as full objects.
-func parentPool(idx cgobject.CommitNodeIndex, start plumbing.Hash) (map[plumbing.Hash][]plumbing.Hash, error) {
+// parent hashes. Parents are read directly from the commit objects. This single
+// walk backs every reachability, ancestor-set, and section-counting question, so
+// the history is loaded at most once.
+func (g *repo) parentPool(start plumbing.Hash) (map[plumbing.Hash][]plumbing.Hash, error) {
 	pool := map[plumbing.Hash][]plumbing.Hash{}
 	stack := []plumbing.Hash{start}
 	for len(stack) > 0 {
@@ -237,11 +248,11 @@ func parentPool(idx cgobject.CommitNodeIndex, start plumbing.Hash) (map[plumbing
 		if _, ok := pool[h]; ok {
 			continue
 		}
-		node, err := idx.Get(h)
+		commit, err := g.r.CommitObject(h)
 		if err != nil {
 			return nil, err
 		}
-		parents := node.ParentHashes()
+		parents := commit.ParentHashes
 		pool[h] = parents
 		for _, ph := range parents {
 			if _, ok := pool[ph]; !ok {

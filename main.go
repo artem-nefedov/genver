@@ -36,8 +36,6 @@ Flags:
                       given as an existing remote name or a remote URL.
                       Requires --tag-main; ignored on a non-main branch.
   --debug             Trace every calculation step to stderr.
-  --no-commit-graph   Ignore the repository's commit-graph file even if present
-                      (forces decoding commit objects; slower, for debugging).
 `
 
 func main() {
@@ -69,7 +67,6 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		tagMain       = fs.Bool("tag-main", false, "tag HEAD on main with the computed version")
 		pushTagTo     = fs.String("push-tag-to", "", "push only the computed tag to the given remote name or URL")
 		debug         = fs.Bool("debug", false, "trace calculation steps to stderr")
-		noCommitGraph = fs.Bool("no-commit-graph", false, "ignore the commit-graph file even if present")
 	)
 
 	if err := fs.Parse(args); err != nil {
@@ -99,6 +96,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		if err != nil {
 			return err
 		}
+		defer g.Close()
 	}
 	branch, err := g.resolveBranch(*branchName)
 	if err != nil {
@@ -113,7 +111,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	if *debug {
 		trace = errOut
 	}
-	calc, err := newCalculatorOpts(g, trace, !*noCommitGraph)
+	calc, err := newCalculatorTrace(g, trace)
 	if err != nil {
 		return err
 	}

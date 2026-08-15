@@ -44,8 +44,7 @@ func TestScenarioBugfixSectionPatch(t *testing.T) {
 	h.commit("d1")
 
 	// 3 bugfix commits + 1 merge + 1 trailing = 5 commits, all patch.
-	// Assert the same answer via both the commit-graph and object-store paths.
-	h.wantBothPaths("6.14.1-alpha.5")
+	h.want("6.14.1-alpha.5")
 }
 
 // TestScenarioNoDevelopBranchesOffMain covers the flow where there is no
@@ -59,7 +58,7 @@ func TestScenarioBugfixSectionPatch(t *testing.T) {
 func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
-	h.commit("c0")     // main root
+	h.commit("c0") // main root
 	h.tag("2.1.0", mustHead(t, h))
 	h.want("2.1.0") // sanity: main reads the tag
 
@@ -67,35 +66,35 @@ func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	// to main. No commits yet -> builds on the 2.1.0 release, counter 0.
 	const bug = "bugfix/ABC-123-foo_bar"
 	h.newBranch(bug)
-	h.wantBothPaths("2.1.0-ABC-123-foo-bar.0")
+	h.want("2.1.0-ABC-123-foo-bar.0")
 
 	// One direct commit -> patch increment, counter 1.
 	h.commit("b1")
-	h.wantBothPaths("2.1.1-ABC-123-foo-bar.1")
+	h.want("2.1.1-ABC-123-foo-bar.1")
 
 	// Merge the bugfix branch back into main and delete it: a plain (non-feature)
 	// merge bumps patch, so main becomes 2.1.1.
 	h.checkout("main")
 	h.mergePR(bug, 1, "acme-org")
 	h.deleteBranch(bug)
-	h.wantBothPaths("2.1.1")
+	h.want("2.1.1")
 
 	// Feature branch off main. A feature branch takes a minor increment
 	// immediately, even with no commits of its own.
 	const feat = "feature/cool-abc"
 	h.newBranch(feat)
-	h.wantBothPaths("2.2.0-cool-abc.0")
+	h.want("2.2.0-cool-abc.0")
 
 	// Two commits advance only the branch counter; the minor stays in scope.
 	h.commit("f1")
 	h.commit("f2")
-	h.wantBothPaths("2.2.0-cool-abc.2")
+	h.want("2.2.0-cool-abc.2")
 
 	// Merge the feature branch into main: a feature merge bumps minor -> 2.2.0.
 	h.checkout("main")
 	h.mergePR(feat, 2, "acme-org")
 	h.deleteBranch(feat)
-	h.wantBothPaths("2.2.0")
+	h.want("2.2.0")
 }
 
 // TestScenarioBugfixMergedThenCheckedOutAgain covers checking out a short-lived
@@ -118,7 +117,7 @@ func TestScenarioBugfixMergedThenCheckedOutAgain(t *testing.T) {
 	h.newBranch(bug)
 	h.commit("b1")
 	// Before the merge: one commit of its own -> patch increment, counter 1.
-	h.wantBothPaths("0.39.6-ABC-1234-fix-something.1")
+	h.want("0.39.6-ABC-1234-fix-something.1")
 
 	// Merge the bugfix branch into develop, but do NOT delete it.
 	h.checkout("develop")
@@ -127,7 +126,7 @@ func TestScenarioBugfixMergedThenCheckedOutAgain(t *testing.T) {
 	// Check the branch out again. Its tip is now an ancestor of develop, but the
 	// version must be unchanged: still counter 1, not 0.
 	h.checkout(bug)
-	h.wantBothPaths("0.39.6-ABC-1234-fix-something.1")
+	h.want("0.39.6-ABC-1234-fix-something.1")
 }
 
 // TestScenarioBugfixMergedAfterDevelopAdvanced covers the same post-merge
@@ -159,7 +158,7 @@ func TestScenarioBugfixMergedAfterDevelopAdvanced(t *testing.T) {
 	// Re-check out the branch: its fork point is below d1/d2, so only its own
 	// commit counts -> counter 1. The core is the boundary + patch = 1.2.1.
 	h.checkout(bug)
-	h.wantBothPaths("1.2.1-ABC-1000.1")
+	h.want("1.2.1-ABC-1000.1")
 }
 
 // TestScenarioDevelopMergedIntoBugfixPatch covers merging develop back INTO a
@@ -180,7 +179,7 @@ func TestScenarioDevelopMergedIntoBugfixPatch(t *testing.T) {
 	const bug = "bugfix/ABC-1000"
 	h.newBranch(bug)
 	h.commit("b1")
-	h.wantBothPaths("0.39.6-ABC-1000.1")
+	h.want("0.39.6-ABC-1000.1")
 
 	// develop advances with plain (patch-only) direct commits.
 	h.checkout("develop")
@@ -191,7 +190,7 @@ func TestScenarioDevelopMergedIntoBugfixPatch(t *testing.T) {
 	// the core stays 0.39.6; the counter bumps (b1 + merge commit -> 2).
 	h.checkout(bug)
 	h.merge("develop")
-	h.wantBothPaths("0.39.6-ABC-1000.2")
+	h.want("0.39.6-ABC-1000.2")
 }
 
 // TestScenarioDevelopMergedIntoBugfixMinor covers merging develop back INTO a
@@ -211,7 +210,7 @@ func TestScenarioDevelopMergedIntoBugfixMinor(t *testing.T) {
 	const bug = "bugfix/ABC-1000"
 	h.newBranch(bug)
 	h.commit("b1")
-	h.wantBothPaths("0.39.6-ABC-1000.1")
+	h.want("0.39.6-ABC-1000.1")
 
 	// develop accrues a minor bump via a feature PR merge (feature commit + merge).
 	h.checkout("develop")
@@ -227,7 +226,7 @@ func TestScenarioDevelopMergedIntoBugfixMinor(t *testing.T) {
 	// the merge commit (2).
 	h.checkout(bug)
 	h.merge("develop")
-	h.wantBothPaths("0.40.0-ABC-1000.2")
+	h.want("0.40.0-ABC-1000.2")
 }
 
 // TestScenarioDevelopMergedIntoBugfixMajor covers merging develop back INTO a
@@ -246,7 +245,7 @@ func TestScenarioDevelopMergedIntoBugfixMajor(t *testing.T) {
 	const bug = "bugfix/ABC-1000"
 	h.newBranch(bug)
 	h.commit("b1")
-	h.wantBothPaths("0.39.6-ABC-1000.1")
+	h.want("0.39.6-ABC-1000.1")
 
 	// develop accrues a major bump via a direct "+semver: major" commit.
 	h.checkout("develop")
@@ -257,7 +256,7 @@ func TestScenarioDevelopMergedIntoBugfixMajor(t *testing.T) {
 	// the merge commit (2).
 	h.checkout(bug)
 	h.merge("develop")
-	h.wantBothPaths("1.0.0-ABC-1000.2")
+	h.want("1.0.0-ABC-1000.2")
 }
 
 // TestScenarioDevelopMergedIntoFeatureKeepsMinor covers merging develop back
@@ -277,7 +276,7 @@ func TestScenarioDevelopMergedIntoFeatureKeepsMinor(t *testing.T) {
 	const feat = "feature/cool-abc"
 	h.newBranch(feat)
 	h.commit("b1")
-	h.wantBothPaths("0.40.0-cool-abc.1")
+	h.want("0.40.0-cool-abc.1")
 
 	// develop advances with plain (patch-only) direct commits.
 	h.checkout("develop")
@@ -288,7 +287,7 @@ func TestScenarioDevelopMergedIntoFeatureKeepsMinor(t *testing.T) {
 	// the minor level (0.40.0); only the counter advances (b1 + merge -> 2).
 	h.checkout(feat)
 	h.merge("develop")
-	h.wantBothPaths("0.40.0-cool-abc.2")
+	h.want("0.40.0-cool-abc.2")
 }
 
 // mustHead returns the current HEAD commit hash, failing the test on error.
@@ -339,15 +338,14 @@ func TestScenarioLargeSectionWithFeatureAndBugfix(t *testing.T) {
 	}
 
 	// develop: minor bump from the feature merge, 50 commits since the boundary.
-	// Assert via both the commit-graph and object-store paths.
-	h.wantBothPaths("0.57.0-alpha.50")
+	h.want("0.57.0-alpha.50")
 
 	// bugfix branch: builds on the boundary with the section's minor already in
 	// scope, no commits of its own -> counter 0.
 	h.checkout(bug)
-	h.wantBothPaths("0.57.0-branch-c.0")
+	h.want("0.57.0-branch-c.0")
 
 	// One commit on the bugfix branch advances only its own counter.
 	h.commit("b1")
-	h.wantBothPaths("0.57.0-branch-c.1")
+	h.want("0.57.0-branch-c.1")
 }

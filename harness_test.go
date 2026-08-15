@@ -14,16 +14,13 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
-	commitgraph "github.com/go-git/go-git/v5/plumbing/format/commitgraph/v2"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
 
 // harness drives a git repo through the workflow so we can assert givi's
 // output at each step of the TASK.md worked example. The repository is backed
-// entirely by an in-memory filesystem, so tests never touch disk (which also
-// lets them write a real commit-graph into the object store; see
-// writeCommitGraph).
+// entirely by an in-memory filesystem, so tests never touch disk.
 type harness struct {
 	t   *testing.T
 	g   *repo
@@ -42,7 +39,7 @@ func newHarnessNamed(t *testing.T, mainName string) *harness {
 	t.Helper()
 	// Back both the object store and the worktree with in-memory filesystems.
 	// The storer is a *filesystem.Storage (not a bare in-memory storer) so that
-	// production's commit-graph detection path is exercised unchanged.
+	// production's storage path is exercised unchanged.
 	storer := filesystem.NewStorage(memfs.New(), cache.NewObjectLRUDefault())
 	r, err := git.Init(storer, memfs.New())
 	if err != nil {
@@ -304,167 +301,4 @@ func runCaptureAll(t *testing.T, h *harness, args ...string) (string, string, er
 	var stdout, stderr bytes.Buffer
 	rerr := runWithRepo(h.g, args, &stdout, &stderr)
 	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), rerr
-}
-
-// writeCommitGraph builds a commit-graph file covering the given commit hashes
-// and writes it to objects/info/commit-graph inside the repository's own
-// (billy) filesystem. It uses go-git's own commit-graph encoder, so no external
-// git binary and no real disk are involved: an in-memory repo gets a real,
-// loadable commit-graph. Passing a subset of the repo's commits produces a
-// deliberately *stale* graph, exercising go-git's per-commit fallback to the
-// object store for the commits it does not cover.
-func writeCommitGraph(t *testing.T, g *repo, hashes []plumbing.Hash) {
-	t.Helper()
-
-	fss, ok := g.r.Storer.(*filesystem.Storage)
-	if !ok {
-		t.Fatalf("repo storer is %T, not *filesystem.Storage; cannot host a commit-graph", g.r.Storer)
-	}
-
-	mem := commitgraph.NewMemoryIndex()
-	// Generation numbers must respect ancestry (a commit's generation exceeds
-	// all its parents'). Assign them by walking parents-before-children.
-	gen := map[plumbing.Hash]uint64{}
-	var assign func(h plumbing.Hash) uint64
-	assign = func(h plumbing.Hash) uint64 {
-		if v, ok := gen[h]; ok {
-			return v
-		}
-		commit, err := g.r.CommitObject(h)
-		if err != nil {
-			t.Fatalf("load commit %s: %v", h, err)
-		}
-		var maxParent uint64
-		for _, ph := range commit.ParentHashes {
-			if pg := assign(ph); pg > maxParent {
-				maxParent = pg
-			}
-		}
-		v := maxParent + 1
-		gen[h] = v
-		return v
-	}
-
-	for _, h := range hashes {
-		commit, err := g.r.CommitObject(h)
-		if err != nil {
-			t.Fatalf("load commit %s: %v", h, err)
-		}
-		mem.Add(h, &commitgraph.CommitData{
-			TreeHash:     commit.TreeHash,
-			ParentHashes: append([]plumbing.Hash(nil), commit.ParentHashes...),
-			Generation:   assign(h),
-			When:         commit.Committer.When,
-		})
-	}
-
-	var buf bytes.Buffer
-	if err := commitgraph.NewEncoder(&buf).Encode(mem); err != nil {
-		t.Fatalf("encode commit-graph: %v", err)
-	}
-
-	fs := fss.Filesystem()
-	if err := fs.MkdirAll("objects/info", 0o755); err != nil {
-		t.Fatalf("mkdir objects/info: %v", err)
-	}
-	f, err := fs.Create("objects/info/commit-graph")
-	if err != nil {
-		t.Fatalf("create commit-graph file: %v", err)
-	}
-	if _, err := f.Write(buf.Bytes()); err != nil {
-		t.Fatalf("write commit-graph: %v", err)
-	}
-	if err := f.Close(); err != nil {
-		t.Fatalf("close commit-graph: %v", err)
-	}
-
-	// Sanity check: the just-written graph must be openable via the same path
-	// production code uses.
-	if _, err := commitgraph.OpenChainOrFileIndex(fs); err != nil {
-		t.Fatalf("commit-graph not loadable after write: %v", err)
-	}
-}
-
-// allCommitHashes returns every commit hash in the repository.
-func allCommitHashes(t *testing.T, g *repo) []plumbing.Hash {
-	t.Helper()
-	iter, err := g.r.CommitObjects()
-	if err != nil {
-		t.Fatalf("CommitObjects: %v", err)
-	}
-	defer iter.Close()
-	var out []plumbing.Hash
-	err = iter.ForEach(func(c *object.Commit) error {
-		out = append(out, c.Hash)
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("iterate commits: %v", err)
-	}
-	return out
-}
-
-// versionThroughGraph computes the version for the repo's current branch with
-// the commit-graph fast path either enabled or disabled, returning the string.
-// When useGraph is true it also asserts the trace confirms the commit-graph was
-// actually used — otherwise the parity comparison would be vacuous (two runs of
-// the same object-store path).
-func versionThroughGraph(t *testing.T, g *repo, useGraph bool) string {
-	t.Helper()
-	branch, err := g.headBranch()
-	if err != nil {
-		t.Fatalf("headBranch: %v", err)
-	}
-	head, err := g.headCommit()
-	if err != nil {
-		t.Fatalf("headCommit: %v", err)
-	}
-	var trace bytes.Buffer
-	calc, err := newCalculatorOpts(g, &trace, useGraph)
-	if err != nil {
-		t.Fatalf("newCalculatorOpts(useGraph=%v): %v", useGraph, err)
-	}
-	if useGraph && !bytes.Contains(trace.Bytes(), []byte("using commit-graph")) {
-		t.Fatalf("expected commit-graph fast path to be active, but trace says otherwise:\n%s", trace.String())
-	}
-	res, err := calc.Calculate(branch, head)
-	if err != nil {
-		t.Fatalf("Calculate(useGraph=%v) on %q: %v", useGraph, branch, err)
-	}
-	v, err := res.version()
-	if err != nil {
-		t.Fatalf("version(useGraph=%v): %v", useGraph, err)
-	}
-	return v
-}
-
-// assertGraphParity asserts that, on the current branch, givi computes the same
-// version whether or not the commit-graph fast path is used.
-func (h *harness) assertGraphParity() {
-	h.t.Helper()
-	withGraph := versionThroughGraph(h.t, h.g, true)
-	withoutGraph := versionThroughGraph(h.t, h.g, false)
-	if withGraph != withoutGraph {
-		branch, _ := h.g.headBranch()
-		h.t.Fatalf("commit-graph parity broken on %q: with graph %q, without graph %q",
-			branch, withGraph, withoutGraph)
-	}
-}
-
-// wantBothPaths writes a fresh, complete commit-graph over the repository's
-// entire current history, then asserts that givi produces expect on the current
-// branch both with the commit-graph fast path and with the object-store slow
-// path. Rewriting the graph on each call keeps it complete even as later
-// assertions add commits, so both paths are genuinely exercised every time.
-func (h *harness) wantBothPaths(expect string) {
-	h.t.Helper()
-	writeCommitGraph(h.t, h.g, allCommitHashes(h.t, h.g))
-	if got := versionThroughGraph(h.t, h.g, true); got != expect {
-		branch, _ := h.g.headBranch()
-		h.t.Fatalf("with commit-graph on %q: got %q, want %q", branch, got, expect)
-	}
-	if got := versionThroughGraph(h.t, h.g, false); got != expect {
-		branch, _ := h.g.headBranch()
-		h.t.Fatalf("without commit-graph on %q: got %q, want %q", branch, got, expect)
-	}
 }

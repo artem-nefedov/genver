@@ -994,32 +994,6 @@ func TestDebugFlag(t *testing.T) {
 			t.Errorf("trace line missing ms timestamp: %q", line)
 		}
 	}
-	// The trace must report which parent-lookup path is in use. A freshly
-	// initialised harness repo has no commit-graph, so the slow path is expected.
-	if !strings.Contains(stderr, "no commit-graph found") {
-		t.Errorf("--debug stderr should report commit-graph status; got:\n%s", stderr)
-	}
-}
-
-// TestNoCommitGraphFlag verifies --no-commit-graph forces the object-store path
-// and is traced as such, while producing the same version.
-func TestNoCommitGraphFlag(t *testing.T) {
-	t.Parallel()
-	h := newHarness(t)
-	h.commit("root")
-	h.newBranch("develop")
-	h.commit("d1")
-
-	stdout, stderr, err := runCaptureAll(t, h, "--no-commit-graph", "--debug")
-	if err != nil {
-		t.Fatalf("--no-commit-graph --debug: err=%v", err)
-	}
-	if stdout != "0.1.1-alpha.1" {
-		t.Errorf("--no-commit-graph stdout = %q, want 0.1.1-alpha.1", stdout)
-	}
-	if !strings.Contains(stderr, "commit-graph disabled by --no-commit-graph") {
-		t.Errorf("expected disabled-path trace, got:\n%s", stderr)
-	}
 }
 
 // TestFormat covers the --format template: each supported variable, the

@@ -23,7 +23,7 @@ Flags:
   --version           Show givi's own version and exit.
   --format <tmpl>     Render the version through a template instead of printing
                       the full version. The template uses ${var} syntax with the
-                      variables: full, base, prerelease, increment, major, minor,
+                      variables: full, base, prerelease, count, major, minor,
                       patch, branch, shortsha, longsha. Doesn't affect tag.
                       Bash parameter expansions are partially supported.
   --tag-format <tmpl> Same as --format, but also affects tag by --tag-main.

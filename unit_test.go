@@ -1003,7 +1003,7 @@ func TestDebugFlag(t *testing.T) {
 func TestFormat(t *testing.T) {
 	t.Parallel()
 	// A develop version has a prerelease tail: 0.1.2-alpha.2 (two develop commits
-	// so the increment is a distinct value, not 1).
+	// so the count is a distinct value, not 1).
 	t.Run("DevelopPrerelease", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -1016,13 +1016,13 @@ func TestFormat(t *testing.T) {
 			"${full}":                        "0.1.1-alpha.2",
 			"${base}":                        "0.1.1",
 			"${prerelease}":                  "-alpha.2",
-			"${increment}":                   "2",
+			"${count}":                       "2",
 			"${major}.${minor}.${patch}":     "0.1.1",
 			"${base}${prerelease}":           "0.1.1-alpha.2",
 			"v${base}":                       "v0.1.1",
 			"major=${major} minor=${minor}":  "major=0 minor=1",
 			"image:${base}${prerelease}-dbg": "image:0.1.1-alpha.2-dbg",
-			"build.${increment}":             "build.2",
+			"build.${count}":                 "build.2",
 		}
 		for tmpl, want := range cases {
 			out, err := runCapture(t, h, "--format", tmpl)
@@ -1032,7 +1032,7 @@ func TestFormat(t *testing.T) {
 		}
 	})
 
-	// On a non-develop branch the label differs but the increment is still the
+	// On a non-develop branch the label differs but the count is still the
 	// trailing counter after the last dot.
 	t.Run("OtherBranchIncrement", func(t *testing.T) {
 		t.Parallel()
@@ -1047,8 +1047,8 @@ func TestFormat(t *testing.T) {
 		if out, err := runCapture(t, h, "--format", "${prerelease}"); err != nil || out != "-cool-abc.3" {
 			t.Errorf("prerelease on feature: out=%q err=%v", out, err)
 		}
-		if out, err := runCapture(t, h, "--format", "${increment}"); err != nil || out != "3" {
-			t.Errorf("increment on feature: out=%q err=%v", out, err)
+		if out, err := runCapture(t, h, "--format", "${count}"); err != nil || out != "3" {
+			t.Errorf("count on feature: out=%q err=%v", out, err)
 		}
 	})
 
@@ -1122,9 +1122,9 @@ func TestFormat(t *testing.T) {
 		if out, err := runCapture(t, h, "--format", "x${prerelease}y"); err != nil || out != "xy" {
 			t.Errorf("empty prerelease: out=%q err=%v", out, err)
 		}
-		// The increment is likewise empty on a release version.
-		if out, err := runCapture(t, h, "--format", "x${increment}y"); err != nil || out != "xy" {
-			t.Errorf("empty increment on release: out=%q err=%v", out, err)
+		// The count is likewise empty on a release version.
+		if out, err := runCapture(t, h, "--format", "x${count}y"); err != nil || out != "xy" {
+			t.Errorf("empty count on release: out=%q err=%v", out, err)
 		}
 	})
 

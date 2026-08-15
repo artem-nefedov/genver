@@ -17,7 +17,7 @@ import (
 //	base        the version core without the prerelease tail, e.g. "1.2.3"
 //	prerelease  the prerelease tail including its leading dash, e.g. "-alpha.4",
 //	            or an empty string on a release version
-//	increment   the trailing counter of the prerelease tail (the number after
+//	count       the trailing counter of the prerelease tail (the number after
 //	            the last dot), e.g. "4", or an empty string on a release version
 //	major       the core's major component, e.g. "1"
 //	minor       the core's minor component, e.g. "2"
@@ -36,20 +36,20 @@ func (r result) renderFormat(tmpl string) (string, error) {
 	}
 	base := r.core.String()
 	prerelease := ""
-	increment := ""
+	count := ""
 	if r.prerelease != "" {
 		prerelease = "-" + r.prerelease
-		// The tail is "<label>.<n>"; the increment is the segment after the last
-		// dot. On a release the tail is empty, so the increment is too.
+		// The tail is "<label>.<n>"; the count is the segment after the last
+		// dot. On a release the tail is empty, so the count is too.
 		if i := strings.LastIndex(r.prerelease, "."); i >= 0 {
-			increment = r.prerelease[i+1:]
+			count = r.prerelease[i+1:]
 		}
 	}
 	vars := map[string]string{
 		"full":       full,
 		"base":       base,
 		"prerelease": prerelease,
-		"increment":  increment,
+		"count":      count,
 		"major":      strconv.FormatUint(r.core.major, 10),
 		"minor":      strconv.FormatUint(r.core.minor, 10),
 		"patch":      strconv.FormatUint(r.core.patch, 10),

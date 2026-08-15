@@ -1,0 +1,9 @@
+FROM docker.io/library/alpine:3.24
+
+RUN apk --no-cache upgrade && apk --no-cache add ca-certificates git
+
+ARG TARGETOS
+ARG TARGETARCH
+COPY ${TARGETOS}/${TARGETARCH}/givi /usr/local/bin/givi
+
+ENTRYPOINT ["/usr/local/bin/givi"]

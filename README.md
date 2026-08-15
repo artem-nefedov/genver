@@ -1,0 +1,85 @@
+# GiVI - Git Version Increment
+
+A dumb [GitVersion](https://github.com/gittools/gitversion) clone with zero configuration.
+
+Generates semver-compatible version based on git tree and current HEAD.
+
+## Installation
+
+### Homebrew (macOS & Linux)
+
+```sh
+brew install artem-nefedov/tap/givi
+```
+
+### Download binary
+
+Pre-built binaries for Linux and macOS (amd64/arm64) are available on the
+[Releases](https://github.com/artem-nefedov/givi/releases) page.
+
+### Docker images
+
+Images of two types (distroless and alpine) are available:
+
+```
+ghcr.io/artem-nefedov/givi:latest
+ghcr.io/artem-nefedov/givi:latest-alpine
+```
+
+Change "latest" to specific release to pin the version.
+
+## Features
+
+- Self-contained statically-linked binary, doesn't rely on other executables
+- Tiny
+- Works only with the specific flow (see below)
+
+## Supported flow
+
+Git repo needs to be generated is structured like this:
+
+- There is a permanent main branch called "main" or "master"
+- Optionally, there is a permanent "develop" branch created from main branch, from which merge commits are made to main, which creates a new release
+- There are short-lived branches created from "develop", where the work is done, and they are then merged into "develop" and deleted
+- Also works if "develop" does not exist and short-lived branches are created from main branch
+- Releases (merge commits) on main branch are tagged
+
+## Calculating version
+
+- If no tags: account for all commits throught the common ancestry from the main root (root commit on main is treated as "0.1.0")
+- If tag exist: take the nearest found tag as a base and stop further descent down the tree
+- Versions on main branch must always be release ones (e.g. "0.1.0", "3.4.5", etc.)
+- Versions on "develop" branch must always have a.b.c-alpha.xy format, e.g. "2.3.0-alpha.43"
+- Versions on other branches are based on branch name, ignoring branch type prefix (part before "/"); e.g. on branch "bugfix/debug_bootstrap" the version may be "0.57.0-debug-bootstrap.42"
+- Whenever major, minor, or patch version is incremented on non-main branch, the counter at the end resets
+- On develop, counter resets to 1. Direct commits increment it by 1. Merge commits - by the number of commits inside the merge.
+- On other branches: while it has no extra commits compared to develop, the counter is 0. Direct commits increment it by 1. Merge commits - by the number of commits inside the merge.
+- Direct commits on main increment patch, unless commit message contains special code "+semver: minor" (bumps minor) or "+semver: major" (bumps major)
+- Direct commits on develop increment patch, unless commit message contains special code "+semver: minor" (bumps minor) or "+semver: major" (bumps major)
+- Merges from branches with feature/ (or feat/) prefix into develop increment minor, unless any of the commits in the merge contain "+semver: major" (bumps major)
+- If first section of develop was not yet incremented compared to release, on new branch we should immediately see the increment
+- On feature/ (or feat/) branches we should see minor increment, which takes precedence over patch increment
+- Version on develop shows what the future release version will be, but if we have no new commits it should not change
+
+## Example
+
+- last commit on main is tagged as "2.1.0"; running givi on main outputs "2.1.0"
+- develop branch was only just merged into main and had no new commits since; givi still outputs "2.1.0-alpha.123"
+- we add direct commit to develop - it now outputs "2.1.1-alpha.1"
+- we add another direct commit - version is "2.1.1-alpha.2"
+- we create branch bugfix/ABC-123-foo_bar; it has no new commits yet; version is "2.1.1-ABC-123-foo-bar.0"
+- we make a direct commit; version is now "2.1.1-ABC-123-foo-bar.1"
+- we merge bugfix/ABC-123-foo_bar into develop and switch to develop; version is "2.1.1-alpha.4" (merge commit also counts)
+- we merge develop into main and switch to main; version is "2.1.1"
+- we switch to develop; it has no extra commits; version is still "2.1.1-alpha.4"
+- we add direct commit to develop - it now outputs "2.1.2-alpha.1"
+- we create branch feature/cool-abc; it has no new commits yet; version is "2.2.0-cool-abc.0"
+- we add 3 direct commits - it now outputs "2.2.0-cool-abc.3"
+- we merge feature/cool-abc into develop and switch to develop; version is "2.2.0-alpha.5"
+- we create branch bugfix/ABC-456; it has no new commits yet; version is "2.2.0-ABC-456.0"
+- we add 2 direct commits - it now outputs "2.2.0-ABC-456.2"
+- we merge bugfix/ABC-456 into develop and switch to develop; version is "2.2.0-alpha.8"
+- we create branch feature/cool-xyz; it has no new commits yet; version is "2.2.0-cool-xyz.0"
+- we add 2 direct commits - it now outputs "2.2.0-cool-xyz.2"
+- we merge feature/cool-xyz into develop and switch to develop; version is "2.2.0-alpha.11"
+- we merge develop into main and switch to main; version is "2.2.0"

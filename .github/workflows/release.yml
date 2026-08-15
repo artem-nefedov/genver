@@ -1,0 +1,91 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # create/push the git tag and the GitHub release
+  packages: write # push images to ghcr.io
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # GoReleaser and givi both need the full history and all tags to
+          # compute the version and the changelog.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # QEMU + Buildx let a single amd64 runner build the linux/arm64 images.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run tests
+        run: make test
+
+      # A single givi invocation does everything version-related for this run:
+      # it computes the release version, creates the matching lightweight tag at
+      # HEAD (--tag-main), pushes ONLY that tag to origin (--push-tag-to), and
+      # prints the computed version on stdout, which we capture. The version is
+      # therefore calculated exactly once. Both --tag-main and --push-tag-to are
+      # idempotent, so re-running on main does not fail.
+      #
+      # The token is embedded in the push URL because go-git authenticates from
+      # the URL's userinfo (it does not read the http.extraheader credential
+      # actions/checkout installs); GITHUB_TOKEN carries the contents:write scope
+      # needed to push a tag.
+      - name: Compute version, tag, and push the tag with givi
+        id: version
+        env:
+          PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+        run: |
+          set -eu
+          VERSION=$(go run . --branch "${{ github.ref_name }}" --tag-main --push-tag-to "$PUSH_URL")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Computed release version: ${VERSION}"
+
+      # Skip GoReleaser when a GitHub release for this version already exists, so
+      # re-runs on main are no-ops. Checking the release (not just the tag) also
+      # recovers from a partial run where the tag was pushed but the release was
+      # never created.
+      - name: Check whether this version is already released
+        id: relcheck
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -eu
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Release $VERSION already exists; skipping."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run GoReleaser
+        if: steps.relcheck.outputs.exists == 'false'
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Force GoReleaser to use givi's already-computed version (the tag givi
+          # created above) instead of its own git-derived guess. CGO is disabled
+          # per-build in .goreleaser.yaml, so it need not be set here.
+          GORELEASER_CURRENT_TAG: ${{ steps.version.outputs.version }}

@@ -1,0 +1,15 @@
+# Compiled binary (matches `go build`/`go install .` output for this module)
+/givi
+# Bootstrap binary built in the release workflow to compute the version
+/givi-bootstrap
+
+# GoReleaser output
+/dist/
+
+# Go build & test artifacts
+*.exe
+*.test
+*.out
+coverage.*
+
+*.txt

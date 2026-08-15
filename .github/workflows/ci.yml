@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # givi reads git history to compute the version; the tests need it too.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check LICENSE copyright year is current
+        run: |
+          year="$(date -u +%Y)"
+          if ! grep -Eq "^Copyright \(c\) ${year} " LICENSE; then
+            echo "::error file=LICENSE::LICENSE copyright year is not ${year}. Update the 'Copyright (c)' line."
+            grep -n "^Copyright" LICENSE || true
+            exit 1
+          fi
+          echo "LICENSE copyright year is ${year}."
+
+      - name: Vet
+        run: make vet
+
+      - name: Test
+        run: make test
+
+      - name: Build (CGO disabled)
+        run: make build

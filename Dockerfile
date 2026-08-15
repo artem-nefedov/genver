@@ -1,0 +1,7 @@
+FROM scratch
+
+ARG TARGETOS
+ARG TARGETARCH
+COPY ${TARGETOS}/${TARGETARCH}/givi /givi
+
+ENTRYPOINT ["/givi"]

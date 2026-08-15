@@ -1,0 +1,11 @@
+# Exclude everything from the build context...
+*
+
+# ...except the prebuilt givi binaries GoReleaser stages under <os>/<arch>/,
+# which the Dockerfiles COPY in. Re-including the directories is required before
+# the files inside them can be un-ignored.
+!linux
+!linux/amd64
+!linux/arm64
+!linux/amd64/givi
+!linux/arm64/givi

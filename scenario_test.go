@@ -98,6 +98,199 @@ func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	h.wantBothPaths("2.2.0")
 }
 
+// TestScenarioBugfixMergedThenCheckedOutAgain covers checking out a short-lived
+// branch again AFTER it has been merged into develop but before it is deleted.
+// Once merged, the branch tip is an ancestor of develop, so a plain merge-base
+// with develop collapses onto the branch tip and would erase the branch's own
+// increment (reporting .0). The version must instead stay stable: the branch is
+// versioned against its fork point on develop's mainline, so its own commit
+// still counts and the increment remains what it was before the merge (.1).
+func TestScenarioBugfixMergedThenCheckedOutAgain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5") // boundary core = 0.39.5; back on develop at the boundary tip
+
+	// Bugfix branch off the boundary with a single commit.
+	const bug = "bugfix/ABC-1234_fix_something"
+	h.newBranch(bug)
+	h.commit("b1")
+	// Before the merge: one commit of its own -> patch increment, counter 1.
+	h.wantBothPaths("0.39.6-ABC-1234-fix-something.1")
+
+	// Merge the bugfix branch into develop, but do NOT delete it.
+	h.checkout("develop")
+	h.mergePR(bug, 175, "align-platform")
+
+	// Check the branch out again. Its tip is now an ancestor of develop, but the
+	// version must be unchanged: still counter 1, not 0.
+	h.checkout(bug)
+	h.wantBothPaths("0.39.6-ABC-1234-fix-something.1")
+}
+
+// TestScenarioBugfixMergedAfterDevelopAdvanced covers the same post-merge
+// checkout, but with develop advancing (and other branches merging in) between
+// the fork and the merge. The fork point sits below the newer develop commits,
+// so the branch's own commit must still be the only thing counted (counter 1);
+// the develop churn since the fork must not leak into the branch's increment.
+func TestScenarioBugfixMergedAfterDevelopAdvanced(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("1.2.0") // boundary core = 1.2.0
+
+	// Bugfix branch off the boundary with a single commit.
+	const bug = "bugfix/ABC-1000"
+	h.newBranch(bug)
+	h.commit("b1")
+
+	// Meanwhile develop advances with its own direct commits.
+	h.checkout("develop")
+	h.commit("d1")
+	h.commit("d2")
+
+	// Now merge the (stale) bugfix branch into the advanced develop; keep it.
+	h.mergePR(bug, 1, "acme-org")
+
+	// Re-check out the branch: its fork point is below d1/d2, so only its own
+	// commit counts -> counter 1. The core is the boundary + patch = 1.2.1.
+	h.checkout(bug)
+	h.wantBothPaths("1.2.1-ABC-1000.1")
+}
+
+// TestScenarioDevelopMergedIntoBugfixPatch covers merging develop back INTO a
+// short-lived branch when develop has only accumulated patch-level commits. The
+// merge advances the branch's fork point up develop's mainline to develop's tip,
+// so the branch now builds on develop's (patch) section: the core stays at the
+// same patch level it already had, and only the trailing counter advances (the
+// branch's own commit plus the merge commit -> 2).
+func TestScenarioDevelopMergedIntoBugfixPatch(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5") // boundary core = 0.39.5
+
+	// Bugfix branch off the boundary with a single commit -> patch, counter 1.
+	const bug = "bugfix/ABC-1000"
+	h.newBranch(bug)
+	h.commit("b1")
+	h.wantBothPaths("0.39.6-ABC-1000.1")
+
+	// develop advances with plain (patch-only) direct commits.
+	h.checkout("develop")
+	h.commit("d1")
+	h.commit("d2")
+
+	// Merge develop into the bugfix branch. develop only had patch commits, so
+	// the core stays 0.39.6; the counter bumps (b1 + merge commit -> 2).
+	h.checkout(bug)
+	h.merge("develop")
+	h.wantBothPaths("0.39.6-ABC-1000.2")
+}
+
+// TestScenarioDevelopMergedIntoBugfixMinor covers merging develop back INTO a
+// short-lived branch after develop accrued a minor-level bump (a feature merge).
+// The develop section now carries a minor bump, and merging it into the branch
+// raises the branch's effective bump from patch to minor: the core moves from
+// the patch level (0.39.6) to the minor level (0.40.0).
+func TestScenarioDevelopMergedIntoBugfixMinor(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5") // boundary core = 0.39.5
+
+	// Bugfix branch off the boundary with a single commit -> patch, counter 1.
+	const bug = "bugfix/ABC-1000"
+	h.newBranch(bug)
+	h.commit("b1")
+	h.wantBothPaths("0.39.6-ABC-1000.1")
+
+	// develop accrues a minor bump via a feature PR merge (feature commit + merge).
+	h.checkout("develop")
+	const feat = "feature/cool-xyz"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.checkout("develop")
+	h.mergePR(feat, 1, "acme-org")
+	h.deleteBranch(feat)
+
+	// Merge develop into the bugfix branch. develop's minor bump wins: the core
+	// goes patch -> minor (0.40.0). Counter counts the branch's own commit plus
+	// the merge commit (2).
+	h.checkout(bug)
+	h.merge("develop")
+	h.wantBothPaths("0.40.0-ABC-1000.2")
+}
+
+// TestScenarioDevelopMergedIntoBugfixMajor covers merging develop back INTO a
+// short-lived branch after develop accrued a major-level bump (a "+semver:
+// major" commit). Merging it into the branch raises the branch's effective bump
+// all the way to major: the core moves to the next major (1.0.0).
+func TestScenarioDevelopMergedIntoBugfixMajor(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5") // boundary core = 0.39.5
+
+	// Bugfix branch off the boundary with a single commit -> patch, counter 1.
+	const bug = "bugfix/ABC-1000"
+	h.newBranch(bug)
+	h.commit("b1")
+	h.wantBothPaths("0.39.6-ABC-1000.1")
+
+	// develop accrues a major bump via a direct "+semver: major" commit.
+	h.checkout("develop")
+	h.commit("rewrite everything\n\n+semver: major")
+
+	// Merge develop into the bugfix branch. develop's major bump wins: the core
+	// goes to the next major (1.0.0). Counter counts the branch's own commit plus
+	// the merge commit (2).
+	h.checkout(bug)
+	h.merge("develop")
+	h.wantBothPaths("1.0.0-ABC-1000.2")
+}
+
+// TestScenarioDevelopMergedIntoFeatureKeepsMinor covers merging develop back
+// INTO a feature branch when develop only had patch commits. A feature branch's
+// increment is floored at minor regardless, so the patch-only develop merge must
+// not pull the core back down: it stays at the minor level (0.40.0) and only the
+// counter advances.
+func TestScenarioDevelopMergedIntoFeatureKeepsMinor(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5") // boundary core = 0.39.5
+
+	// Feature branch off the boundary with a single commit -> minor, counter 1.
+	const feat = "feature/cool-abc"
+	h.newBranch(feat)
+	h.commit("b1")
+	h.wantBothPaths("0.40.0-cool-abc.1")
+
+	// develop advances with plain (patch-only) direct commits.
+	h.checkout("develop")
+	h.commit("d1")
+	h.commit("d2")
+
+	// Merge develop into the feature branch. The feature floor keeps the core at
+	// the minor level (0.40.0); only the counter advances (b1 + merge -> 2).
+	h.checkout(feat)
+	h.merge("develop")
+	h.wantBothPaths("0.40.0-cool-abc.2")
+}
+
 // mustHead returns the current HEAD commit hash, failing the test on error.
 func mustHead(t *testing.T, h *harness) plumbing.Hash {
 	t.Helper()

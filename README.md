@@ -54,6 +54,8 @@ Git repo needs to be generated is structured like this:
 - Whenever major, minor, or patch version is incremented on non-main branch, the counter at the end resets
 - On develop, counter resets to 1. Direct commits increment it by 1. Merge commits - by the number of commits inside the merge.
 - On other branches: while it has no extra commits compared to develop, the counter is 0. Direct commits increment it by 1. Merge commits - by the number of commits inside the merge.
+- A branch is versioned relative to its fork point on develop's mainline, so once it is merged back into develop its own commits still count (its version stays stable) until the branch advances or is deleted
+- If develop is merged INTO a feature/bugfix/etc. branch, the branch's fork point advances up develop's mainline to the merged develop tip, so it inherits develop's accumulated bump: a patch-only develop keeps the branch's core unchanged (only the trailing counter advances), while a develop that had reason to bump minor or major raises the branch's increment to minor or major accordingly (feature branches keep their minor floor)
 - Direct commits on main increment patch, unless commit message contains special code "+semver: minor" (bumps minor) or "+semver: major" (bumps major)
 - Direct commits on develop increment patch, unless commit message contains special code "+semver: minor" (bumps minor) or "+semver: major" (bumps major)
 - Merges from branches with feature/ (or feat/) prefix into develop increment minor, unless any of the commits in the merge contain "+semver: major" (bumps major)

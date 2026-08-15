@@ -526,26 +526,58 @@ func (c *calculator) integrationBranch() (*object.Commit, string, error) {
 	return mainCommit, name, nil
 }
 
+// forkBase returns the commit on the integration branch's first-parent chain
+// (its permanent mainline) that the branch was cut from: the newest such commit
+// that is an ancestor of head.
+//
+// This is the branch's fork point, and it is stable regardless of whether the
+// branch has since been merged back into the integration branch. A plain
+// merge-base collapses onto head once the branch is merged (its own commits then
+// belong to the integration branch), which would erase the branch's increment;
+// walking the integration mainline instead ignores the merge commit — head is
+// its second parent, not an ancestor of it — and finds the true fork point. When
+// the branch has advanced past that fork point (e.g. develop was later merged
+// back into it), the newest chain commit reachable from head is still the fork
+// point, so the branch's own commits above it are counted correctly.
+func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Commit, error) {
+	chain, err := c.g.firstParentChain(integrationTip) // newest first
+	if err != nil {
+		return nil, err
+	}
+	pool, err := parentPool(c.idx, head.Hash)
+	if err != nil {
+		return nil, err
+	}
+	for _, cm := range chain {
+		if _, reachable := pool[cm.Hash]; reachable {
+			return cm, nil
+		}
+	}
+	// No mainline commit is an ancestor of head (unrelated histories): fall back
+	// to the plain merge-base so the caller still has a base to build on.
+	return c.g.mergeBase(head, integrationTip)
+}
+
 // otherVersion computes the (core, counter) for a non-main, non-develop branch.
 //
 // The branch is versioned relative to the integration branch it was cut from:
 // "develop" when that permanent branch exists, otherwise "main" (the flow where
 // short-lived branches are created directly off main). In the main-based flow
 // every main commit above the latest tag is itself a release boundary, so the
-// merge-base with main is a boundary and the "section" below the branch carries
+// fork point on main is a boundary and the "section" below the branch carries
 // no accumulated bump — the branch builds straight on main's release core.
 func (c *calculator) otherVersion(head *object.Commit, branch string) (core, int, error) {
 	integrationTip, integration, err := c.integrationBranch()
 	if err != nil {
 		return core{}, 0, err
 	}
-	mb, err := c.g.mergeBase(head, integrationTip)
+	mb, err := c.forkBase(head, integrationTip)
 	if err != nil {
 		return core{}, 0, err
 	}
-	c.logf("other: merge-base with %s is %s", integration, short(mb.Hash))
+	c.logf("other: fork point on %s is %s", integration, short(mb.Hash))
 
-	// The merge-base is an ancestor of head, so one parent pool walked from head
+	// The fork point is an ancestor of head, so one parent pool walked from head
 	// holds everything both the develop-section scan and the branch count need.
 	pool, err := parentPool(c.idx, head.Hash)
 	if err != nil {
@@ -553,13 +585,13 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, int
 	}
 
 	// Determine the release core the integration section builds on, and the bump
-	// that section has accumulated so far (at the merge-base). A single
-	// section-scan handles both the boundary and non-boundary merge-base cases.
+	// that section has accumulated so far (at the fork point). A single
+	// section-scan handles both the boundary and non-boundary fork-point cases.
 	var belowCore core
 	sectionBump := bumpNone
 	if bcore, ok := c.isBoundary(mb); ok {
 		belowCore = bcore
-		c.logf("other: merge-base is a release boundary (%s); %s section bump = none", bcore, integration)
+		c.logf("other: fork point is a release boundary (%s); %s section bump = none", bcore, integration)
 	} else {
 		scan, err := c.scanSectionInPool(mb.Hash, false, pool)
 		if err != nil {
@@ -573,9 +605,9 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, int
 		c.logf("other: %s section starts at %s (%s); %s section bump = %s", integration, short(scan.baseHash), scan.baseCore, integration, sectionBump)
 	}
 
-	// The branch's own commits (reachable from head but not from the merge-base)
+	// The branch's own commits (reachable from head but not from the fork point)
 	// contribute at least a patch bump. Exclude everything reachable from the
-	// merge-base so the count matches `git rev-list mb..head`.
+	// fork point so the count matches `git rev-list mb..head`.
 	mbSet := ancestorHashesIn(mb.Hash, pool)
 	n, branchBump, err := c.countAndBumpInPool(head.Hash, mbSet, pool)
 	if err != nil {
@@ -589,7 +621,7 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, int
 	}
 
 	out := belowCore.bump(eff)
-	c.logf("other: effective bump = %s; %d commit(s) since merge-base; core %s -> %s", eff, n, belowCore, out)
+	c.logf("other: effective bump = %s; %d commit(s) since fork point; core %s -> %s", eff, n, belowCore, out)
 	return out, n, nil
 }
 

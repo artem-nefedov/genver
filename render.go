@@ -14,7 +14,7 @@ import (
 // fails in strict mode:
 //
 //	full        the complete version, e.g. "1.2.3-alpha.4" or "1.2.3"
-//	base        the version core without the prerelease tail, e.g. "1.2.3"
+//	core        the version core without the prerelease tail, e.g. "1.2.3"
 //	prerelease  the prerelease tail including its leading dash, e.g. "-alpha.4",
 //	            or an empty string on a release version
 //	count       the trailing counter of the prerelease tail (the number after
@@ -34,7 +34,7 @@ func (r result) renderFormat(tmpl string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	base := r.core.String()
+	core := r.core.String()
 	prerelease := ""
 	count := ""
 	if r.prerelease != "" {
@@ -47,7 +47,7 @@ func (r result) renderFormat(tmpl string) (string, error) {
 	}
 	vars := map[string]string{
 		"full":       full,
-		"base":       base,
+		"core":       core,
 		"prerelease": prerelease,
 		"count":      count,
 		"major":      strconv.FormatUint(r.core.major, 10),

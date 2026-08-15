@@ -1014,14 +1014,14 @@ func TestFormat(t *testing.T) {
 
 		cases := map[string]string{
 			"${full}":                        "0.1.1-alpha.2",
-			"${base}":                        "0.1.1",
+			"${core}":                        "0.1.1",
 			"${prerelease}":                  "-alpha.2",
 			"${count}":                       "2",
 			"${major}.${minor}.${patch}":     "0.1.1",
-			"${base}${prerelease}":           "0.1.1-alpha.2",
-			"v${base}":                       "v0.1.1",
+			"${core}${prerelease}":           "0.1.1-alpha.2",
+			"v${core}":                       "v0.1.1",
 			"major=${major} minor=${minor}":  "major=0 minor=1",
-			"image:${base}${prerelease}-dbg": "image:0.1.1-alpha.2-dbg",
+			"image:${core}${prerelease}-dbg": "image:0.1.1-alpha.2-dbg",
 			"build.${count}":                 "build.2",
 		}
 		for tmpl, want := range cases {
@@ -1100,8 +1100,8 @@ func TestFormat(t *testing.T) {
 			t.Errorf("shortsha: out=%q err=%v, want %q", out, err, want[:8])
 		}
 		// A realistic image tag combining version and short sha.
-		if out, err := runCapture(t, h, "--format", "${base}-${shortsha}"); err != nil || out != "0.1.1-"+want[:8] {
-			t.Errorf("base+shortsha: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
+		if out, err := runCapture(t, h, "--format", "${core}-${shortsha}"); err != nil || out != "0.1.1-"+want[:8] {
+			t.Errorf("core+shortsha: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
 		}
 	})
 
@@ -1114,10 +1114,10 @@ func TestFormat(t *testing.T) {
 		if out, err := runCapture(t, h, "--format", "${full}"); err != nil || out != "0.1.0" {
 			t.Errorf("full on main: out=%q err=%v", out, err)
 		}
-		// The prerelease tail is empty on a release, so base and full match and a
+		// The prerelease tail is empty on a release, so core and full match and a
 		// bare ${prerelease} renders nothing.
-		if out, err := runCapture(t, h, "--format", "${base}${prerelease}"); err != nil || out != "0.1.0" {
-			t.Errorf("base+prerelease on release: out=%q err=%v", out, err)
+		if out, err := runCapture(t, h, "--format", "${core}${prerelease}"); err != nil || out != "0.1.0" {
+			t.Errorf("core+prerelease on release: out=%q err=%v", out, err)
 		}
 		if out, err := runCapture(t, h, "--format", "x${prerelease}y"); err != nil || out != "xy" {
 			t.Errorf("empty prerelease: out=%q err=%v", out, err)
@@ -1136,11 +1136,11 @@ func TestFormat(t *testing.T) {
 		h.newBranch("develop")
 		h.commit("d1")
 
-		sep, err := runCapture(t, h, "--format", "${base}")
+		sep, err := runCapture(t, h, "--format", "${core}")
 		if err != nil || sep != "0.1.1" {
 			t.Errorf("--format arg: out=%q err=%v", sep, err)
 		}
-		eq, err := runCapture(t, h, "--format=${base}")
+		eq, err := runCapture(t, h, "--format=${core}")
 		if err != nil || eq != "0.1.1" {
 			t.Errorf("--format=arg: out=%q err=%v", eq, err)
 		}
@@ -1163,7 +1163,7 @@ func TestFormat(t *testing.T) {
 			"${prerelease#*.}":  "2",       // everything after the first dot
 			"${full%-*}":        "0.1.1",   // drop the trailing "-<tail>"
 			"${full/-/+}":       "0.1.1+alpha.2",
-			"${base//./_}":      "0_1_1", // replace all dots
+			"${core//./_}":      "0_1_1", // replace all dots
 		}
 		for tmpl, want := range cases {
 			out, err := runCapture(t, h, "--format", tmpl)

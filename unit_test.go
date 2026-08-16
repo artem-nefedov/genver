@@ -8,6 +8,141 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
+func TestDeletingMergedBranchDoesNotChangeVersion(t *testing.T) {
+	t.Parallel()
+
+	// givi derives a merge's nature (feature/bugfix/directive) solely from the
+	// merge commit's MESSAGE, never from branch refs — real git-flow deletes
+	// short-lived branches after merge. Each case computes the version with the
+	// merged branch ref still present, deletes it, and asserts the version is
+	// unchanged.
+	cases := []struct {
+		name  string
+		build func(t *testing.T, h *harness) string // returns branch name to delete
+	}{
+		{
+			// A feature merge into develop earns a minor; the "feature/" nature
+			// comes from the merge message, so deleting the branch is a no-op.
+			name: "FeatureMergeIntoDevelop",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("develop")
+				h.newBranch("feature/x")
+				h.commit("f1")
+				h.checkout("develop")
+				h.merge("feature/x")
+				return "feature/x"
+			},
+		},
+		{
+			// A bugfix merge into develop earns only the patch floor.
+			name: "BugfixMergeIntoDevelop",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("develop")
+				h.newBranch("bugfix/y")
+				h.commit("b1")
+				h.checkout("develop")
+				h.merge("bugfix/y")
+				return "bugfix/y"
+			},
+		},
+		{
+			// A direct feature merge into main.
+			name: "FeatureMergeDirectToMain",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("feature/x")
+				h.commit("f1")
+				h.checkout("main")
+				h.merge("feature/x")
+				return "feature/x"
+			},
+		},
+		{
+			// A merge carrying an explicit "+semver:" directive: the directive
+			// lives in the message, so deletion cannot affect it.
+			name: "DirectiveMergeIntoMain",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("feature/x")
+				h.commit("f1")
+				h.checkout("main")
+				h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: major")
+				return "feature/x"
+			},
+		},
+		{
+			// A feature merge whose merged tip carries a reference tag: the tag is
+			// keyed by commit hash, not by the branch ref, so deletion is a no-op.
+			name: "FeatureMergeWithReferenceTag",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("develop")
+				h.newBranch("feature/x")
+				h.commit("f1")
+				h.tag("1.5.0-x.3", mustHead(t, h))
+				h.checkout("develop")
+				h.merge("feature/x")
+				return "feature/x"
+			},
+		},
+		{
+			// The develop -> main release merge: main's release core is computed
+			// from the merge commit's second parent (the develop tip reached via
+			// the commit graph), not via the "develop" ref. Deleting develop after
+			// the release must leave main's version unchanged. Note develop is a
+			// long-lived branch, unlike the short-lived topic branches above.
+			name: "DevelopReleaseMergeIntoMain",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("develop")
+				h.newBranch("feature/x")
+				h.commit("f1")
+				h.checkout("develop")
+				h.merge("feature/x") // feature-minor inside the develop section
+				h.checkout("main")
+				h.merge("develop") // release merge develop -> main
+				return "develop"
+			},
+		},
+		{
+			// A tagged release, then a second develop section and release: the
+			// running release core walks main's first-parent chain and the develop
+			// tips through the commit graph, so deleting develop is still a no-op.
+			name: "DevelopReleaseMergeAfterTaggedRelease",
+			build: func(t *testing.T, h *harness) string {
+				h.commit("root")
+				h.newBranch("develop")
+				h.commit("d1")
+				h.checkout("main")
+				mg := h.merge("develop")
+				h.tag("0.2.0", mg)
+				h.checkout("develop")
+				h.merge("main")
+				h.commit("d2")
+				h.checkout("main")
+				h.merge("develop")
+				return "develop"
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			branch := tc.build(t, h)
+			before := h.version()
+			h.deleteBranch(branch)
+			after := h.version()
+			if before != after {
+				t.Fatalf("deleting merged branch %q changed version: before %q, after %q", branch, before, after)
+			}
+		})
+	}
+}
+
 func TestSanitizeLabel(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
@@ -126,7 +261,6 @@ func TestMasterBranch(t *testing.T) {
 		// Merge feature into develop, then release develop into master and tag.
 		h.checkout("develop")
 		h.merge("feature/x")
-		h.deleteBranch("feature/x")
 		h.want("0.2.0-alpha.3")
 		h.checkout("master")
 		mg := h.merge("develop")
@@ -156,7 +290,6 @@ func TestMasterBranch(t *testing.T) {
 		h.want("2.2.0-cool.1")
 		h.checkout("master")
 		h.merge("feature/cool")
-		h.deleteBranch("feature/cool")
 		h.want("2.2.0")
 	})
 }
@@ -356,7 +489,6 @@ func TestAnnotatedTags(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		h.merge("feature/x")
-		h.deleteBranch("feature/x")
 		h.want("0.2.0-alpha.2") // minor, 2 commits since 0.1.1 boundary
 
 		// Cut 0.2.0 with another annotated tag; main reflects it.
@@ -381,7 +513,6 @@ func TestAnnotatedTags(t *testing.T) {
 		h.commit("f1")
 		h.checkout("main")
 		h.merge("feature/next")
-		h.deleteBranch("feature/next")
 		h.want("1.3.0") // minor bump off the annotated 1.2.0 release, once
 	})
 }
@@ -656,7 +787,6 @@ func TestPrereleaseTagsIgnored(t *testing.T) {
 		// Merge the branch into develop: the prerelease tag still must not leak.
 		h.checkout("develop")
 		h.merge("bugfix/rogue")
-		h.deleteBranch("bugfix/rogue")
 		h.want("2.1.1-alpha.4") // still building on 2.1.0, not 9.10.0
 	})
 
@@ -763,7 +893,6 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
 		h.checkout("develop")
 		h.merge("bugfix/ref")
-		h.deleteBranch("bugfix/ref")
 
 		h.want("4.5.6-alpha.4") // tag core, alpha label, normal develop count
 	})
@@ -787,7 +916,6 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
 		h.checkout("develop")
 		h.merge("bugfix/ref")
-		h.deleteBranch("bugfix/ref")
 
 		h.checkout("main")
 		h.merge("develop")
@@ -836,10 +964,11 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 	})
 
 	// Same direct-into-main flow with a feature branch. The reference tag on the
-	// branch tip anchors the core to 4.5.6, but the feature merge — which carries
-	// the same weight as "+semver: minor" and sits ABOVE the tagged tip — lifts
-	// the anchor by a minor. To keep the tag's core exactly, the tag would have
-	// to sit on the merge commit itself (see ReferenceTagDownwardAnchor).
+	// branch tip anchors the core to 4.5.6. The direct merge is a feature merge,
+	// but it is merely the integration of the tagged branch — its automatic
+	// feature-minor is exactly what the tag overrides, so it does NOT lift the
+	// anchor. (Only an explicit "+semver:" on the merge message, or a signal on a
+	// commit AFTER the tag, would lift it.)
 	t.Run("DirectFeatureMergeIntoMainRelease", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -853,7 +982,7 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 
 		h.checkout("main")
 		h.merge("feature/ref")
-		h.want("4.6.0") // anchor 4.5.6 lifted a minor by the feature merge
+		h.want("4.5.6") // anchored; the feature merge does not lift its own tag
 	})
 
 	// Direct merge into main where the reference core is LOWER than main's
@@ -903,7 +1032,6 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		fm := h.merge("feature/big") // would bump minor -> 1.3.0
-		h.deleteBranch("feature/big")
 		h.want("1.3.0-alpha.4")
 
 		// Pin it back down to the patch range with a reference tag on the merge.
@@ -941,7 +1069,6 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		fm := h.merge("feature/big")
-		h.deleteBranch("feature/big")
 		h.tag("1.2.3-alpha.2", fm) // anchor to 1.2.3
 		h.want("1.2.3-alpha.4")
 
@@ -977,7 +1104,6 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		h.merge("feature/one")
-		h.deleteBranch("feature/one")
 		h.want("1.3.0-alpha.5") // single minor step
 
 		// A second feature merge after the tag must NOT bump again: still minor,
@@ -986,7 +1112,6 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f2")
 		h.checkout("develop")
 		h.merge("feature/two")
-		h.deleteBranch("feature/two")
 		h.want("1.3.0-alpha.7") // still 1.3.0, counter only
 
 		// An explicit "+semver: minor" after the tag is the same strength as the
@@ -1020,7 +1145,6 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		h.merge("feature/one")
-		h.deleteBranch("feature/one")
 		h.want("1.3.0-alpha.5") // minor so far
 
 		h.commit("breaking +semver: major")
@@ -1055,7 +1179,6 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		// Merging into develop must also not drop below the boundary.
 		h.checkout("develop")
 		h.merge("bugfix/low")
-		h.deleteBranch("bugfix/low")
 		h.want("2.0.1-alpha.4")
 	})
 
@@ -1164,9 +1287,10 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 	})
 
 	// Direct feature merge into main: a reference tag on the branch TIP anchors
-	// the core, but the feature merge (weight of "+semver: minor") sits above the
-	// tag and lifts it by a minor — so the tag alone does not revert the bump.
-	t.Run("FeatureMergeLiftsTagOnBranchTip", func(t *testing.T) {
+	// the core to 1.2.3. The direct merge is a feature merge, but it is only the
+	// integration of the tagged branch, so its automatic feature-minor does NOT
+	// lift the anchor — the tag reverts the branch's own bump.
+	t.Run("FeatureMergeOfTaggedTipDoesNotLift", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.commit("root")
@@ -1178,13 +1302,38 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.tag("1.2.3-foobar.2", mustHead(t, h)) // on the branch tip
 		h.checkout("main")
 		h.merge("feature/ref")
-		h.deleteBranch("feature/ref")
-		h.want("1.3.0") // anchor 1.2.3 lifted a minor by the feature merge
+		h.want("1.2.3") // anchored; the feature merge does not lift its own tag
 	})
 
-	// To actually revert a feature merge's minor bump, the reference tag must sit
-	// on the MERGE COMMIT itself: nothing is then above the tag, so its core
-	// stands as the release.
+	// But a signal on a commit AFTER the tag inside the merged branch DOES lift
+	// the anchor: here a feature branch is merged into the ref-tagged branch above
+	// the tag, then the whole thing is merged into main.
+	t.Run("SignalAfterTagInMergedBranchLifts", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+
+		// A feature branch to merge into the ref-tagged branch later.
+		h.newBranch("feature/inner")
+		h.commit("i1")
+
+		h.checkout("main")
+		h.newBranch("bugfix/ref")
+		h.commit("b1")
+		h.tag("1.2.3-foobar.2", mustHead(t, h)) // anchor on the branch
+		h.merge("feature/inner")                // feature merge AFTER the tag lifts it
+		h.want("1.3.0-foobar.4")
+
+		h.checkout("main")
+		h.merge("bugfix/ref")
+		h.want("1.3.0") // in-branch feature merge after the tag lifted the anchor
+	})
+
+	// To also revert when the merge commit itself should carry the release core,
+	// the reference tag can sit on the MERGE COMMIT: nothing is above it, so its
+	// core stands as the release.
 	t.Run("RevertFeatureMergeByTaggingMergeCommit", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -1196,9 +1345,125 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f1")
 		h.checkout("main")
 		mc := h.merge("feature/ref") // feature merge would bump minor -> 1.3.0
-		h.deleteBranch("feature/ref")
 		h.tag("1.2.3-foobar.2", mc) // tag ON the merge commit reverts it
 		h.want("1.2.3")
+	})
+}
+
+// TestReferenceTagPatchPropagation verifies that a feature branch lowered to a
+// patch by a reference tag (with nothing restoring it) carries that patch
+// verdict through a merge into develop and on to a release, exactly as if a
+// bugfix branch had been merged — unless a "+semver:" directive on a merge
+// commit overrides it. It also verifies the boundaries of that propagation: a
+// feature branch that RECEIVES such a tagged branch keeps its own minor, and a
+// fresh feature branch cut from a now-patched develop has its own minor.
+func TestReferenceTagPatchPropagation(t *testing.T) {
+	t.Parallel()
+
+	// setup builds main=1.2.2 with develop synced to it, returning the harness on
+	// develop.
+	setup := func(t *testing.T) *harness {
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("1.2.2", mg)
+		h.checkout("develop")
+		h.merge("main")
+		return h
+	}
+
+	// A feature branch capped to patch, merged plainly into develop, keeps the
+	// patch: develop and the subsequent release are 1.2.3, not 1.3.0.
+	t.Run("PatchFeatureIntoDevelopStaysPatch", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.tag("1.2.3-x.2", mustHead(t, h))
+		h.checkout("develop")
+		h.merge("feature/x") // plain merge, no +semver
+		h.want("1.2.3-alpha.4") // patch inherited from the capped feature branch
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.2.3") // patch release
+	})
+
+	// A "+semver: minor" on the develop merge commit overrides the inherited
+	// patch and restores the minor.
+	t.Run("SemverOnDevelopMergeRestoresMinor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.tag("1.2.3-x.2", mustHead(t, h))
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: minor")
+		h.want("1.3.0-alpha.4") // +semver on the merge restores minor
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.3.0")
+	})
+
+	// A feature branch that RECEIVES a patch-capped feature branch keeps its OWN
+	// minor: the merged-in tag does not cap the receiver.
+	t.Run("PatchFeatureIntoFeatureKeepsMinor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/a")
+		h.commit("a1")
+		h.tag("1.2.3-a.2", mustHead(t, h)) // feature/a capped to patch
+		h.checkout("develop")
+		h.newBranch("feature/b")
+		h.commit("b1")
+		h.merge("feature/a") // merge the capped branch into feature/b
+		h.want("1.3.0-b.3") // feature/b keeps its own minor
+
+		h.checkout("develop")
+		h.merge("feature/b")
+		h.want("1.3.0-alpha.6") // minor propagates to develop
+	})
+
+	// A fresh feature branch cut from a develop that was patched by a capped
+	// feature merge has its own minor.
+	t.Run("NewFeatureFromPatchedDevelopHasMinor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.tag("1.2.3-x.2", mustHead(t, h))
+		h.checkout("develop")
+		h.merge("feature/x")
+		h.want("1.2.3-alpha.4") // develop patched
+
+		h.newBranch("feature/y")
+		h.commit("y1")
+		h.want("1.3.0-y.1") // fresh feature branch: own minor
+
+		h.checkout("develop")
+		h.merge("feature/y")
+		h.want("1.3.0-alpha.6") // minor from the new feature branch
+	})
+
+	// A patch-capped feature branch merged directly into main (no develop) is a
+	// patch release.
+	t.Run("PatchFeatureDirectToMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.tag("1.2.3-x.2", mustHead(t, h))
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("1.2.3") // patch release, feature minor reverted by the tag
 	})
 }
 
@@ -1368,7 +1633,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-cool-abc.3")
 		h.checkout("main")
 		h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
-		h.deleteBranch("feature/cool-abc")
 		h.want("0.2.0") // minor bumped ONCE (not once per feature commit)
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
@@ -1394,7 +1658,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-cool-abc.3") // minor increment from the feat/ prefix
 		h.checkout("main")
 		h.merge("feat/cool-abc") // "Merge branch 'feat/cool-abc'"
-		h.deleteBranch("feat/cool-abc")
 		h.want("0.2.0") // minor bumped ONCE via the feat/ merge
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
@@ -1419,7 +1682,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-cool-abc.3")
 		h.checkout("main")
 		mg = h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
-		h.deleteBranch("feature/cool-abc")
 		h.want("0.2.0") // minor bumped ONCE (not once per feature commit)
 		h.tag("0.2.0", mg)
 		h.checkout("develop")
@@ -1444,7 +1706,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.1.1-ABC-9.2")
 		h.checkout("main")
 		h.merge("bugfix/ABC-9")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1") // patch bumped ONCE
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
@@ -1468,7 +1729,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.1.1-ABC-9.2")
 		h.checkout("main")
 		h.merge("bugfix/ABC-9")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1") // patch bumped ONCE
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
@@ -1493,7 +1753,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("b2")
 		h.checkout("main")
 		h.merge("bugfix/ABC-9")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1") // patch bumped ONCE
 		h.checkout("develop")
 		h.want("0.1.1-alpha.1")
@@ -1514,7 +1773,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("breaking change +semver: major")
 		h.checkout("main")
 		h.merge("feature/big")
-		h.deleteBranch("feature/big")
 		h.want("1.0.0") // major from the merged commit, applied once
 	})
 
@@ -1529,7 +1787,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("adds a feature really +semver: minor")
 		h.checkout("main")
 		h.merge("hotfix/urgent")
-		h.deleteBranch("hotfix/urgent")
 		h.want("0.2.0") // minor from the merged commit, applied once
 	})
 
@@ -1544,7 +1801,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("f2")
 		h.checkout("main")
 		h.mergeMsg("feature/big", "Merge branch 'feature/big'\n\n+semver: major")
-		h.deleteBranch("feature/big")
 		h.want("1.0.0") // major from the merge commit message, applied once
 	})
 
@@ -1558,7 +1814,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("h1")
 		h.checkout("main")
 		h.mergeMsg("hotfix/urgent", "Merge branch 'hotfix/urgent'\n\n+semver: minor")
-		h.deleteBranch("hotfix/urgent")
 		h.want("0.2.0") // minor from the merge commit message, applied once
 	})
 
@@ -1572,7 +1827,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("f2")
 		h.checkout("main")
 		h.mergeMsg("feature/big", "+semver: major")
-		h.deleteBranch("feature/big")
 		h.want("1.0.0") // major from the merge commit message, applied once
 	})
 
@@ -1585,7 +1839,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("h1")
 		h.checkout("main")
 		h.mergeMsg("hotfix/urgent", "+semver: minor")
-		h.deleteBranch("hotfix/urgent")
 		h.want("0.2.0") // minor from the merge commit message, applied once
 	})
 
@@ -1599,12 +1852,11 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("f1")
 		h.checkout("main")
 		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: minor")
-		h.deleteBranch("feature/x")
 		h.want("0.2.0") // minor floor and minor marker agree: bumped once
 	})
 
-	// A "+semver: major" in the merge message wins over a weaker "+semver: minor"
-	// on a commit inside the merged branch (max, not stacking).
+	// A "+semver: major" in the merge message is exact and overrides a weaker
+	// "+semver: minor" on a commit inside the merged branch.
 	t.Run("MergeMessageBeatsInnerCommit", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -1613,7 +1865,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("h1 +semver: minor")
 		h.checkout("main")
 		h.mergeMsg("hotfix/urgent", "Merge branch 'hotfix/urgent'\n\n+semver: major")
-		h.deleteBranch("hotfix/urgent")
 		h.want("1.0.0") // major from the merge message dominates the inner minor
 	})
 
@@ -1631,7 +1882,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("f1")
 		h.checkout("main")
 		h.merge("feature/next")
-		h.deleteBranch("feature/next")
 		h.want("1.3.0") // minor bump off the 1.2.0 release, once
 	})
 
@@ -1652,7 +1902,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("b1")
 		h.checkout("main")
 		mg = h.merge("bugfix/ABC-9")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1")
 		h.tag("0.1.1", mg)
 		h.want("0.1.1")
@@ -1680,7 +1929,6 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.commit("b1")
 		h.checkout("main")
 		h.merge("bugfix/ABC-9")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1")
 		h.checkout("develop")
 		h.want("0.2.0-alpha.2")
@@ -1816,7 +2064,6 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
-		h.deleteBranch("feature/cool-abc")
 		h.want("0.2.0-alpha.2") // minor bump from the feature merge
 	})
 
@@ -1830,7 +2077,6 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.checkout("develop")
 		// "Merge remote-tracking branch 'origin/feature/cool-abc' into develop"
 		h.mergeRemote("feature/cool-abc", "origin")
-		h.deleteBranch("feature/cool-abc")
 		h.want("0.2.0-alpha.2") // same minor bump, remote-tracking message
 	})
 
@@ -1843,7 +2089,6 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.commit("b1")
 		h.checkout("develop")
 		h.mergeRemote("bugfix/ABC-9", "origin")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1-alpha.2") // bugfix -> patch bump only, not minor
 	})
 
@@ -1857,7 +2102,6 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.checkout("develop")
 		// "Merge pull request #7 from acme-org/feature/cool-abc"
 		h.mergePR("feature/cool-abc", 7, "acme-org")
-		h.deleteBranch("feature/cool-abc")
 		h.want("0.2.0-alpha.2") // same minor bump, PR-style message
 	})
 
@@ -1870,15 +2114,14 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.commit("b1")
 		h.checkout("develop")
 		h.mergePR("bugfix/ABC-9", 8, "acme-org")
-		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1-alpha.2") // bugfix -> patch bump only, not minor
 	})
 }
 
 // TestReleaseMergeMessageSemver verifies that a "+semver:" directive in the
-// develop->main release-merge commit's own message raises the release bump level
-// (via max), not by stacking an extra increment. The develop section otherwise
-// carries only a patch's worth of change, so the marker is what lifts the core.
+// develop->main release-merge commit's own message is EXACT: it forces the
+// release to baseCore.bump(directive), overriding whatever develop accumulated
+// (it can cap the release down as well as raise it).
 func TestReleaseMergeMessageSemver(t *testing.T) {
 	t.Parallel()
 
@@ -1909,9 +2152,11 @@ func TestReleaseMergeMessageSemver(t *testing.T) {
 		h.want("0.2.0") // release-merge marker raises patch -> minor
 	})
 
-	// A "+semver: minor" on the release merge does not lower a develop section
-	// that already earned a major (via a develop commit's own marker): max wins.
-	t.Run("DoesNotLowerSectionBump", func(t *testing.T) {
+	// A "+semver:" directive on the release merge is EXACT: it forces the release
+	// to baseCore.bump(directive), overriding whatever develop accumulated — even
+	// a develop commit's own "+semver: major". Here a "+semver: minor" release
+	// merge caps a develop major down to a minor release.
+	t.Run("ExactOverridesSectionBump", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.commit("root") // main = 0.1.0
@@ -1920,7 +2165,208 @@ func TestReleaseMergeMessageSemver(t *testing.T) {
 		h.want("1.0.0-alpha.1")
 		h.checkout("main")
 		h.mergeMsg("develop", "Merge branch 'develop'\n\n+semver: minor")
-		h.want("1.0.0") // section's major dominates the merge's minor
+		h.want("0.2.0") // release-merge directive is exact: 0.1.0 + minor
+	})
+}
+
+// TestMergeDirectiveCapsContent verifies that an explicit "+semver:" directive on
+// a merge commit is EXACT — the merge is worth exactly that level, both floor
+// and ceiling — so it caps whatever the merge brought in: inner "+semver:" bumps,
+// feature merges, and reference-tag anchors are all overridden. In particular a
+// previously-ignored "+semver: patch" merge now reliably pins a patch bump.
+func TestMergeDirectiveCapsContent(t *testing.T) {
+	t.Parallel()
+
+	// develop base: main=1.2.2 synced to develop.
+	setup := func(t *testing.T) *harness {
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("1.2.2", mg)
+		h.checkout("develop")
+		h.merge("main")
+		return h
+	}
+
+	// "+semver: patch" on a merge into develop caps an inner "+semver: minor".
+	t.Run("PatchCapsInnerMinorIntoDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.commit("big +semver: minor")
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("1.2.3-alpha.5") // patch cap, inner minor ignored
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.2.3")
+	})
+
+	// "+semver: patch" caps an inner FEATURE merge (a bugfix branch that received
+	// a feature merge) when merged into develop.
+	t.Run("PatchCapsInnerFeatureMerge", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/inner")
+		h.commit("i1")
+		h.checkout("develop")
+		h.newBranch("bugfix/b")
+		h.commit("b1")
+		h.merge("feature/inner")
+		h.checkout("develop")
+		h.mergeMsg("bugfix/b", "Merge branch 'bugfix/b'\n\n+semver: patch")
+		h.want("1.2.3-alpha.6") // inner feature merge capped to patch
+	})
+
+	// "+semver: minor" caps an inner "+semver: major".
+	t.Run("MinorCapsInnerMajor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.commit("break +semver: major")
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: minor")
+		h.want("1.3.0-alpha.5") // major capped to minor
+	})
+
+	// "+semver: patch" caps an inner "+semver: major" (two levels down) when
+	// merged into develop, and the subsequent release stays a patch.
+	t.Run("PatchCapsInnerMajorIntoDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.commit("break +semver: major")
+		h.want("2.0.0-x.2") // the branch itself resolves to a major before the merge
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("1.2.3-alpha.5") // inner major capped all the way to patch
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.2.3")
+	})
+
+	// "+semver: patch" on the merge overrides a reference-tag anchor the merged
+	// branch carried.
+	t.Run("PatchOverridesReferenceTag", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.tag("1.5.0-x.3", mustHead(t, h))
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("1.2.3-alpha.4") // reference tag overridden by the patch directive
+	})
+
+	// A stronger directive in the same message wins (order-independent).
+	t.Run("StrongerDirectiveInSameMessageWins", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch\n+semver: minor")
+		h.want("1.3.0-alpha.4") // minor beats patch in the same message
+	})
+
+	// Direct merge into main: "+semver: patch" caps inner minor to a patch
+	// release.
+	t.Run("PatchCapsInnerMinorDirectToMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.commit("big +semver: minor")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("1.2.3") // patch release, inner minor capped
+	})
+
+	// Direct merge into main: "+semver: minor" caps an inner major.
+	t.Run("MinorCapsInnerMajorDirectToMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.commit("break +semver: major")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: minor")
+		h.want("1.3.0") // minor release, inner major capped
+	})
+
+	// Direct merge into main: "+semver: patch" caps an inner "+semver: major"
+	// (two levels down) to a patch release.
+	t.Run("PatchCapsInnerMajorDirectToMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.commit("break +semver: major")
+		h.want("2.0.0-x.2") // the branch itself resolves to a major before the merge
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("1.2.3") // patch release, inner major capped all the way down
+	})
+
+	// Ceilings compose through NESTED merges: the lowest cap along a path wins.
+	// An outer "+semver: patch" merge introduces a subtree that itself contains
+	// an inner "+semver: minor" merge over an inner "+semver: major". The inner
+	// minor merge would be worth minor on its own, but the outer patch cap
+	// restricts the whole introduced subtree — inner minor and inner major alike
+	// — down to patch.
+	t.Run("PatchCapComposesThroughNestedMinorMerge", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("inner")
+		h.commit("i1")
+		h.commit("boom +semver: major")
+		h.checkout("develop")
+		h.newBranch("outer")
+		h.commit("o1")
+		h.mergeMsg("inner", "Merge branch 'inner'\n\n+semver: minor")
+		h.checkout("develop")
+		h.mergeMsg("outer", "Merge branch 'outer'\n\n+semver: patch")
+		h.want("1.2.3-alpha.7") // outer patch caps the nested minor+major subtree
+	})
+
+	// A commit reached via an INDEPENDENT, un-capped path keeps its full weight:
+	// a "+semver: major" commit is merged into both branch A (under a
+	// "+semver: patch" cap) and branch B (with no directive). When develop merges
+	// both, B's un-capped path preserves the major even though A's path capped it.
+	t.Run("IndependentUncappedPathKeepsWeight", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("shared")
+		h.commit("s1 +semver: major")
+		h.checkout("develop")
+		h.newBranch("A")
+		h.commit("a1")
+		h.mergeMsg("shared", "Merge branch 'shared'\n\n+semver: patch")
+		h.checkout("develop")
+		h.newBranch("B")
+		h.commit("b1")
+		h.merge("shared") // no directive: un-capped path to the shared major
+		h.checkout("develop")
+		h.mergeMsg("A", "Merge branch 'A'")
+		h.mergeMsg("B", "Merge branch 'B'")
+		h.want("2.0.0-alpha.9") // shared major survives via B's un-capped merge
 	})
 }
 
@@ -1945,7 +2391,6 @@ func TestBranchMergeIntoDevelopMessageSemver(t *testing.T) {
 		h.commit("b1")
 		h.checkout("develop")
 		h.mergeMsg("bugfix/x", "Merge branch 'bugfix/x'\n\n+semver: major")
-		h.deleteBranch("bugfix/x")
 		h.want("1.0.0-alpha.2") // b1 + merge = 2 commits; merge marker raises major
 	})
 
@@ -1960,7 +2405,6 @@ func TestBranchMergeIntoDevelopMessageSemver(t *testing.T) {
 		h.commit("b1")
 		h.checkout("develop")
 		h.mergeMsg("bugfix/x", "Merge branch 'bugfix/x'\n\n+semver: minor")
-		h.deleteBranch("bugfix/x")
 		h.want("0.2.0-alpha.2") // merge marker raises patch -> minor
 	})
 
@@ -1975,7 +2419,6 @@ func TestBranchMergeIntoDevelopMessageSemver(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: major")
-		h.deleteBranch("feature/x")
 		h.want("1.0.0-alpha.2") // major from the merge message dominates minor floor
 	})
 
@@ -1991,7 +2434,6 @@ func TestBranchMergeIntoDevelopMessageSemver(t *testing.T) {
 		h.commit("b1")
 		h.checkout("develop")
 		h.mergeMsg("bugfix/x", "Merge branch 'bugfix/x'\n\n+semver: major")
-		h.deleteBranch("bugfix/x")
 		h.want("1.0.0-alpha.2")
 		h.checkout("main")
 		h.merge("develop") // plain release merge, no marker of its own
@@ -2026,14 +2468,12 @@ func TestFeatureMergePropagatesThroughBugfix(t *testing.T) {
 	h.commit("f1")
 	h.checkout("bugfix/foo")
 	h.merge("feature/bar") // "Merge branch 'feature/bar'"
-	h.deleteBranch("feature/bar")
 	h.want("0.2.0-foo.3") // minor now: b1 + f1 + merge = 3 commits
 
 	// Merge the bugfix branch into develop. The feature merge is now in develop's
 	// section, so develop is minor-bumped too.
 	h.checkout("develop")
 	h.merge("bugfix/foo")
-	h.deleteBranch("bugfix/foo")
 	h.want("0.2.0-alpha.4") // b1 + f1 + feature-merge + bugfix-merge = 4 commits
 
 	// Release: merge develop into main and tag. The release core is develop's
@@ -2068,14 +2508,12 @@ func TestFeatureMergeThroughBugfixDirectToMain(t *testing.T) {
 	h.commit("f1")
 	h.checkout("bugfix/foo")
 	h.merge("feature/bar") // "Merge branch 'feature/bar'"
-	h.deleteBranch("feature/bar")
 	h.want("0.2.0-foo.3") // minor now: b1 + f1 + merge = 3 commits
 
 	// Merge the bugfix branch directly into main: the feature merge in the
 	// bugfix's history must lift the direct merge to a minor, applied once.
 	h.checkout("main")
 	h.merge("bugfix/foo")
-	h.deleteBranch("bugfix/foo")
 	h.want("0.2.0") // minor release, not a patch
 }
 
@@ -2101,7 +2539,6 @@ func TestMultipleMergesBumpOnce(t *testing.T) {
 			h.commit("work on " + name)
 			h.checkout("develop")
 			h.merge(name)
-			h.deleteBranch(name)
 		}
 
 		mergeTopic("feature/a") // minor
@@ -2127,7 +2564,6 @@ func TestMultipleMergesBumpOnce(t *testing.T) {
 			h.commit("work on " + name)
 			h.checkout("develop")
 			h.merge(name)
-			h.deleteBranch(name)
 		}
 
 		mergeBugfix("bugfix/a")

@@ -38,7 +38,6 @@ func TestScenarioBugfixSectionPatch(t *testing.T) {
 	h.commit("b3")
 	h.checkout("develop")
 	h.mergePR(bug, 1, "acme-org") // bugfix PR merge -> patch, not minor
-	h.deleteBranch(bug)
 
 	// One trailing direct develop commit.
 	h.commit("d1")
@@ -76,7 +75,6 @@ func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	// merge bumps patch, so main becomes 2.1.1.
 	h.checkout("main")
 	h.mergePR(bug, 1, "acme-org")
-	h.deleteBranch(bug)
 	h.want("2.1.1")
 
 	// Feature branch off main. A feature branch takes a minor increment
@@ -93,7 +91,6 @@ func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	// Merge the feature branch into main: a feature merge bumps minor -> 2.2.0.
 	h.checkout("main")
 	h.mergePR(feat, 2, "acme-org")
-	h.deleteBranch(feat)
 	h.want("2.2.0")
 }
 
@@ -219,7 +216,6 @@ func TestScenarioDevelopMergedIntoBugfixMinor(t *testing.T) {
 	h.commit("f1")
 	h.checkout("develop")
 	h.mergePR(feat, 1, "acme-org")
-	h.deleteBranch(feat)
 
 	// Merge develop into the bugfix branch. develop's minor bump wins: the core
 	// goes patch -> minor (0.40.0). Counter counts the branch's own commit plus
@@ -321,7 +317,6 @@ func TestScenarioLargeSectionWithFeatureAndBugfix(t *testing.T) {
 	h.commit("f1")
 	h.checkout("develop")
 	h.mergePR(feat, 2, "acme-org") // feature PR merge -> minor
-	h.deleteBranch(feat)
 
 	// Advance develop to 40 commits into the section, then branch the bugfix.
 	// Its merge-base therefore sits above the feature merge (minor stays in scope).

@@ -29,7 +29,6 @@ func TestWorkflowWithCrossMerges(t *testing.T) {
 	h.commit("f2")
 	h.checkout("develop")
 	h.merge("feature/cool-abc")
-	h.deleteBranch("feature/cool-abc")
 
 	// Bugfix branch (inherits the section's minor after the feature merge).
 	h.newBranch("bugfix/ABC-1")

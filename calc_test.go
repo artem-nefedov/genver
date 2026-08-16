@@ -40,7 +40,6 @@ func TestWorkedExample(t *testing.T) {
 	// Merge bugfix into develop (the merge commit counts too).
 	h.checkout("develop")
 	h.merge("bugfix/ABC-123-foo_bar")
-	h.deleteBranch("bugfix/ABC-123-foo_bar")
 	h.want("2.1.1-alpha.4")
 
 	// --- Release 2.1.1. ---
@@ -67,7 +66,6 @@ func TestWorkedExample(t *testing.T) {
 
 	h.checkout("develop")
 	h.merge("feature/cool-abc")
-	h.deleteBranch("feature/cool-abc")
 	h.want("2.2.0-alpha.5")
 
 	// --- A bugfix after a feature merge inherits the section's minor bump. ---
@@ -79,7 +77,6 @@ func TestWorkedExample(t *testing.T) {
 
 	h.checkout("develop")
 	h.merge("bugfix/ABC-456")
-	h.deleteBranch("bugfix/ABC-456")
 	h.want("2.2.0-alpha.8")
 
 	// --- Another feature branch. ---
@@ -91,7 +88,6 @@ func TestWorkedExample(t *testing.T) {
 
 	h.checkout("develop")
 	h.merge("feature/cool-xyz")
-	h.deleteBranch("feature/cool-xyz")
 	h.want("2.2.0-alpha.11")
 
 	// --- Release 2.2.0. ---
@@ -133,7 +129,6 @@ func TestManyReleases(t *testing.T) {
 	// A bugfix branch after a feature was merged inherits the section's minor.
 	h.checkout("develop")
 	h.merge("feature/new-thing")
-	h.deleteBranch("feature/new-thing")
 	h.want("0.2.0-alpha.2") // feature commit + merge commit = 2 commits in section
 
 	h.newBranch("bugfix/urgent")

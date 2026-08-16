@@ -44,7 +44,21 @@ type calculator struct {
 	tagVPrefix map[plumbing.Hash]bool          // commit hash -> its release tag is "v"-prefixed
 	refs       map[plumbing.Hash]prereleaseRef // commit hash -> prerelease reference tag
 	conflicts  map[plumbing.Hash]error         // tagged commit hash -> ambiguity error (lazy)
+	msgBumps   map[plumbing.Hash]bumpKind      // commit hash -> parsed "+semver:" bump (memo)
 	trace      io.Writer                       // nil disables tracing
+}
+
+// msgBump returns the "+semver:" bump encoded in a commit's message, memoized by
+// commit hash. The same commits are visited by several walks (boundary
+// discovery, ceiling computation, and the main range scan), so caching the
+// parse avoids re-running the directive regex on identical messages.
+func (c *calculator) msgBump(commit *object.Commit) bumpKind {
+	if b, ok := c.msgBumps[commit.Hash]; ok {
+		return b
+	}
+	b := bumpFromMessage(commit.Message)
+	c.msgBumps[commit.Hash] = b
+	return b
 }
 
 func newCalculator(g *repo) (*calculator, error) {
@@ -54,7 +68,7 @@ func newCalculator(g *repo) (*calculator, error) {
 // newCalculatorTrace builds a calculator that logs every calculation step to
 // trace (unless trace is nil).
 func newCalculatorTrace(g *repo, trace io.Writer) (*calculator, error) {
-	c := &calculator{g: g, trace: trace}
+	c := &calculator{g: g, trace: trace, msgBumps: map[plumbing.Hash]bumpKind{}}
 
 	// Cache the tag maps once; they are consulted repeatedly. Release tags become
 	// boundaries; prerelease reference tags (with a trailing counter) pin an
@@ -210,7 +224,7 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 			// unless overridden). The commit itself is a release boundary at that
 			// core, so a develop branched from (or that merges) this point on main
 			// builds on the main core here rather than falling back to the root.
-			cur = cur.bump(max(bumpPatch, bumpFromMessage(cm.Message)))
+			cur = cur.bump(max(bumpPatch, c.msgBump(cm)))
 			add(cm, cur, plumbing.ZeroHash)
 			continue
 		}
@@ -224,7 +238,7 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 			// merged tip, built on the boundaries registered so far. A
 			// "+semver:" directive on the release-merge commit itself raises the
 			// bump level (via max) just as it would on any other commit.
-			dc, derr := c.developReleaseCore(p, bumpFromMessage(cm.Message))
+			dc, derr := c.developReleaseCore(p, c.msgBump(cm))
 			if derr != nil {
 				return nil, derr
 			}
@@ -386,13 +400,12 @@ func (c *calculator) scanSectionInPool(start plumbing.Hash, excludeStart bool, p
 	// consumers via max(baseCore, refAnchor)). The after-tag bump needs its own
 	// walk because its range (tag..start) differs from the section's.
 	if rs.hasRef {
-		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
-		after, aerr := c.scanRange(start, afterExclude, pool)
+		lift, aerr := c.anchorLiftBump(start, rs.nearestHash, pool)
 		if aerr != nil {
 			return sectionScan{}, aerr
 		}
 		res.hasRef = true
-		res.refAnchor = rs.nearestRef.core.bump(after.explicitBump)
+		res.refAnchor = rs.nearestRef.core.bump(lift)
 	}
 	return res, nil
 }
@@ -420,7 +433,20 @@ type rangeScan struct {
 // ties in distance toward the higher core so the anchor is deterministic; both
 // the nearest and highest reference commits are checked for tag conflicts, since
 // either may be relevant to the answer.
+//
+// A merge commit carrying an explicit "+semver:" directive imposes that level as
+// a CEILING on everything it introduced (the commits reachable from its second
+// parent but not its first): an inner "+semver: major" under a "+semver: minor"
+// merge is capped to minor, and a "+semver: patch" merge suppresses inner minor
+// bumps, feature merges, and reference tags alike. Ceilings compose through
+// nesting (the lowest wins along a path) but a commit also reachable by an
+// independent, un-capped path keeps its full weight. The commit COUNT is never
+// affected — every commit in the range is counted once.
 func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (rangeScan, error) {
+	ceilings, err := c.computeCeilings(start, exclude, pool)
+	if err != nil {
+		return rangeScan{}, err
+	}
 	var res rangeScan
 	haveRefs := len(c.refs) > 0
 	// A distance map doubles as the "seen" set; the BFS order it imposes is only
@@ -439,6 +465,10 @@ func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bo
 			continue
 		}
 		res.count++
+		ceiling := bumpMajor
+		if cv, ok := ceilings[h]; ok {
+			ceiling = cv
+		}
 		// Decode the commit only while it can still change a bump; once both
 		// bumps have peaked at major there is nothing left to learn from messages.
 		if res.bump < bumpMajor || res.explicitBump < bumpMajor {
@@ -446,14 +476,17 @@ func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bo
 			if err != nil {
 				return rangeScan{}, err
 			}
-			explicit := bumpFromMessage(commit.Message)
-			if isFeatureMerge(commit) {
-				explicit = max(explicit, bumpMinor)
+			explicit, berr := c.explicitCommitBump(commit)
+			if berr != nil {
+				return rangeScan{}, berr
 			}
+			explicit = min(explicit, ceiling) // a capping merge limits its content
 			res.explicitBump = max(res.explicitBump, explicit)
 			res.bump = max(res.bump, max(bumpPatch, explicit))
 		}
-		if haveRefs {
+		// A patch ceiling suppresses reference tags too (the "+semver: patch"
+		// merge overrides even a reference-tag anchor the merged branch carried).
+		if haveRefs && ceiling > bumpPatch {
 			if pr, ok := c.refs[h]; ok {
 				d := dist[h]
 				if bestDist < 0 || d < bestDist || (d == bestDist && less(res.nearestRef.core, pr.core)) {
@@ -490,6 +523,168 @@ func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bo
 		}
 	}
 	return res, nil
+}
+
+// anchorLiftBump returns the explicit bump that lifts a reference anchor: the
+// strongest EXPLICIT signal ("+semver:" directive or feature merge) on commits
+// reachable from start but not from the anchor commit anchorHash (i.e. commits
+// after the tag). A feature merge contributes minor only if the branch it
+// integrates itself resolves to minor-or-higher; a feature branch that a
+// reference tag capped to patch (with nothing restoring it) contributes only
+// patch, exactly like a bugfix merge — so merging such a branch does not undo
+// its own patch decision. An explicit "+semver:" on any commit still applies.
+func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) (bumpKind, error) {
+	afterExclude := ancestorHashesIn(anchorHash, pool)
+	seen := map[plumbing.Hash]bool{}
+	stack := []plumbing.Hash{start}
+	bump := bumpNone
+	for len(stack) > 0 {
+		h := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if seen[h] || afterExclude[h] {
+			continue
+		}
+		seen[h] = true
+		parents, ok := pool[h]
+		if !ok {
+			continue
+		}
+		if bump < bumpMajor {
+			commit, err := c.g.r.CommitObject(h)
+			if err != nil {
+				return bumpNone, err
+			}
+			b, berr := c.explicitCommitBump(commit)
+			if berr != nil {
+				return bumpNone, berr
+			}
+			bump = max(bump, b)
+		}
+		for _, ph := range parents {
+			if !seen[ph] && !afterExclude[ph] {
+				stack = append(stack, ph)
+			}
+		}
+	}
+	return bump, nil
+}
+
+// explicitCommitBump is the strongest EXPLICIT bump a single commit contributes:
+// its own "+semver:" directive, combined with — for a feature merge — the bump
+// the merged-in feature branch actually resolves to (which a reference tag on
+// that branch's tip may have capped to patch). No patch floor is applied here;
+// an ordinary commit contributes bumpNone.
+func (c *calculator) explicitCommitBump(commit *object.Commit) (bumpKind, error) {
+	b := c.msgBump(commit)
+	if isFeatureMerge(commit) {
+		fb, err := c.featureMergeBump(commit)
+		if err != nil {
+			return bumpNone, err
+		}
+		b = max(b, fb)
+	}
+	return b, nil
+}
+
+// featureMergeBump returns the EXPLICIT bump a feature merge commit contributes,
+// honoring a reference tag on the merged-in branch. Normally a feature merge is
+// an explicit minor. But if the merged-in branch was capped to patch by a
+// reference tag on its tip (the merge's second parent), the merge inherits that
+// patch verdict and behaves like an ordinary/bugfix merge: it contributes NO
+// explicit bump (bumpNone), so it neither lifts a reference anchor nor exceeds
+// the patch floor applied elsewhere. The merge commit's own "+semver:" directive
+// (handled by the caller) still applies on top. A tag deeper inside the merged
+// branch does not cap it: the branch's own later work reasserts the feature
+// minor.
+func (c *calculator) featureMergeBump(m *object.Commit) (bumpKind, error) {
+	if !isFeatureMerge(m) {
+		return bumpNone, nil
+	}
+	// A "+semver: patch" on the merge caps it: the feature-minor is suppressed
+	// (the caller still applies the patch via bumpFromMessage), regardless of a
+	// reference-tag anchor on the merged branch.
+	if c.msgBump(m) == bumpPatch {
+		return bumpNone, nil
+	}
+	if len(c.refs) == 0 || m.NumParents() < 2 {
+		return bumpMinor, nil
+	}
+	tip := m.ParentHashes[1]
+	if _, ok := c.refs[tip]; !ok {
+		return bumpMinor, nil // no anchor on the merged tip: full feature minor
+	}
+	if err := c.conflictAt(tip); err != nil {
+		return bumpNone, err
+	}
+	// The tag is on the merged tip, so nothing inside the branch is after it to
+	// restore the minor: the branch is capped. Its feature-ness contributes no
+	// explicit bump (it is treated like a bugfix merge).
+	return bumpNone, nil
+}
+
+// computeCeilings assigns each commit in the range base..start (reachable from
+// start, not in exclude) the bump CEILING that applies to it. A commit with no
+// entry is uncapped (ceiling bumpMajor). A merge commit carrying an explicit
+// "+semver:" directive d caps every commit it introduced — those reachable from
+// its second parent but not from its first — at min(d, the merge's own ceiling),
+// composing through nested capping merges. A commit reachable by an independent
+// path that is not under a capping merge keeps its full weight: the recorded
+// ceiling is the MAXIMUM (least restrictive) over all paths that reach it.
+func (c *calculator) computeCeilings(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (map[plumbing.Hash]bumpKind, error) {
+	ceilings := map[plumbing.Hash]bumpKind{}
+	// visited records the strongest ceiling a commit has been reached with, so a
+	// commit is re-expanded only when found via a less restrictive path.
+	visited := map[plumbing.Hash]bumpKind{}
+	type item struct {
+		h       plumbing.Hash
+		ceiling bumpKind
+	}
+	stack := []item{{start, bumpMajor}}
+	for len(stack) > 0 {
+		it := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		if exclude[it.h] {
+			continue
+		}
+		if prev, ok := visited[it.h]; ok && prev >= it.ceiling {
+			continue // already reached with an equal-or-less-restrictive ceiling
+		}
+		visited[it.h] = it.ceiling
+		if it.ceiling < bumpMajor {
+			// Record the least restrictive ceiling seen so far for this commit.
+			if cur, ok := ceilings[it.h]; !ok || it.ceiling > cur {
+				ceilings[it.h] = it.ceiling
+			}
+		}
+		parents, ok := pool[it.h]
+		if !ok {
+			continue
+		}
+		// Does this commit impose a lower ceiling on the branch it merged in?
+		introducedCeiling := it.ceiling
+		if len(parents) >= 2 {
+			commit, err := c.g.r.CommitObject(it.h)
+			if err != nil {
+				return nil, err
+			}
+			if d := c.msgBump(commit); d != bumpNone {
+				introducedCeiling = min(introducedCeiling, d)
+			}
+		}
+		for i, ph := range parents {
+			if exclude[ph] {
+				continue
+			}
+			// The first parent stays on the current line (outer ceiling); the
+			// merged-in parents (second and beyond) inherit the merge's ceiling.
+			ceiling := it.ceiling
+			if i > 0 {
+				ceiling = introducedCeiling
+			}
+			stack = append(stack, item{ph, ceiling})
+		}
+	}
+	return ceilings, nil
 }
 
 // sectionCore reduces a completed section scan to its release core, applying
@@ -552,13 +747,12 @@ func (c *calculator) developVersion(head *object.Commit) (core, int, bool, error
 }
 
 // developReleaseCore returns the release core for a develop tip being merged
-// into main, with its section bump level raised via max by extraBump. extraBump
-// is the bump requested by the release-merge commit's own "+semver:" directive:
-// like every other "+semver:" it sets the bump LEVEL (patch<minor<major) rather
-// than stacking an additional increment, so max is applied to the section bump
-// before it is applied to the base core. When develop's tip is itself a release
-// boundary (a tag pins the core) there is no section bump to raise, so the
-// pinned core is returned unchanged.
+// into main. extraBump is the "+semver:" directive on the release-merge commit
+// itself: as for every merge commit, an explicit directive is the final
+// authority, forcing the release to exactly baseCore.bump(directive) — it can
+// cap the release DOWN (a "+semver: patch" release merge yields a patch even if
+// develop accumulated a minor) as well as raise it. With no directive the
+// release publishes develop's accumulated core unchanged.
 func (c *calculator) developReleaseCore(tip *object.Commit, extraBump bumpKind) (core, error) {
 	if extraBump == bumpNone {
 		dc, _, _, err := c.developVersion(tip)
@@ -568,14 +762,17 @@ func (c *calculator) developReleaseCore(tip *object.Commit, extraBump bumpKind) 
 		if err := c.boundaryConflictAt(tip.Hash); err != nil {
 			return core{}, err
 		}
+		// The release core is already pinned at this tip (by a tag, or by the
+		// boundary the release merge registered in the discovery pass). The
+		// directive was already applied when that core was computed; return it.
 		return bcore, nil
 	}
 	scan, err := c.scanSection(tip, false)
 	if err != nil {
 		return core{}, err
 	}
-	out := scan.core(extraBump)
-	c.logf("develop: release-merge +semver (bump %s); core %s -> %s", extraBump, scan.baseCore, out)
+	out := scan.baseCore.bump(extraBump) // directive is exact over the release base
+	c.logf("develop: release-merge +semver:%s exact; core %s -> %s", extraBump, scan.baseCore, out)
 	return out, nil
 }
 
@@ -618,7 +815,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 		switch {
 		case cm.NumParents() < 2:
 			// Direct commit on main: patch bump unless overridden.
-			bump := max(bumpPatch, bumpFromMessage(cm.Message))
+			bump := max(bumpPatch, c.msgBump(cm))
 			next := cur.bump(bump)
 			c.logf("main: direct commit %s -> %s bump: %s -> %s", short(cm.Hash), bump, cur, next)
 			cur = next
@@ -631,7 +828,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 			if err != nil {
 				return core{}, false, err
 			}
-			dc, err := c.developReleaseCore(p, bumpFromMessage(cm.Message))
+			dc, err := c.developReleaseCore(p, c.msgBump(cm))
 			if err != nil {
 				return core{}, false, err
 			}
@@ -680,20 +877,25 @@ func (c *calculator) isDevelopReleaseMerge(cm *object.Commit) bool {
 // release main already sits at. The commits considered are those reachable from
 // the merged tip (second parent) but not from main's prior tip (first parent).
 func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error) {
-	// A feature merge carries the same weight as "+semver: minor" and, like an
-	// explicit directive on the merge commit, sits ABOVE the merged section, so
-	// it lifts a reference anchor. A non-feature merge's patch floor is not such
-	// an explicit signal (a plain merge behaves like a plain commit for anchor
-	// purposes): it advances the non-anchor core but does not lift the anchor.
-	mergeSignal := bumpFromMessage(cm.Message)
-	if isFeatureMerge(cm) {
-		mergeSignal = max(mergeSignal, bumpMinor)
+	// A "+semver: patch" directive on the merge commit (with no stronger
+	// directive in the same message) caps the merge at a plain patch bump,
+	// overriding the automatic feature-minor, any inner "+semver:" bumps, and
+	// even a reference-tag anchor the merged branch carried. The merge message is
+	// the final authority on the resulting bump.
+	if d := c.msgBump(cm); d != bumpNone {
+		next := base.bump(d)
+		c.logf("main: direct merge %s has +semver:%s -> %s -> %s", short(cm.Hash), d, base, next)
+		return next, nil
 	}
-	floor := bumpPatch
-	if isFeatureMerge(cm) {
-		floor = bumpMinor
+
+	// No directive on the merge: a feature merge is worth minor only if the
+	// merged-in branch actually resolves to minor (a reference tag on that branch
+	// may have capped it to patch); any other branch floors at patch.
+	featureBump, err := c.featureMergeBump(cm)
+	if err != nil {
+		return core{}, err
 	}
-	mergeBump := max(floor, mergeSignal)
+	mergeBump := max(bumpPatch, featureBump)
 
 	p0, err := cm.Parent(0)
 	if err != nil {
@@ -728,19 +930,15 @@ func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error)
 		return scan.core(bumpNone), nil
 	}
 	if rs.hasRef {
-		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
-		after, aerr := c.scanRange(p1.Hash, afterExclude, pool)
+		lift, aerr := c.anchorLiftBump(p1.Hash, rs.nearestHash, pool)
 		if aerr != nil {
 			return core{}, aerr
 		}
 		scan.hasRef = true
-		scan.refAnchor = rs.nearestRef.core.bump(after.explicitBump)
+		scan.refAnchor = rs.nearestRef.core.bump(lift)
 		scan.refFloor = rs.nearestRef.core
 	}
-	// Explicit signals on the merge commit (a "+semver:" directive or a feature
-	// merge, equal weight) sit above the merged section, so they lift the anchor;
-	// a non-feature merge's patch floor does not.
-	return scan.core(mergeSignal), nil
+	return scan.core(bumpNone), nil
 }
 
 // integrationBranch returns the tip and name of the branch that short-lived
@@ -884,12 +1082,29 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	// the release boundary the branch builds on. When the tag's anchor is below
 	// that boundary, the tag is ignored and the normally-computed core stands.
 	if rs.hasRef {
-		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
-		after, aerr := c.scanRange(head.Hash, afterExclude, pool)
+		after, aerr := c.scanRange(head.Hash, ancestorHashesIn(rs.nearestHash, pool), pool)
 		if aerr != nil {
 			return core{}, "", 0, false, aerr
 		}
-		anchor := rs.nearestRef.core.bump(after.explicitBump)
+		lift, lerr := c.anchorLiftBump(head.Hash, rs.nearestHash, pool)
+		if lerr != nil {
+			return core{}, "", 0, false, lerr
+		}
+		anchor := rs.nearestRef.core.bump(lift)
+		// The anchor CAPS the branch (can lower it below its own feature-minor)
+		// only when the tag is on the branch's OWN first-parent line. A tag that
+		// arrived via a merge (on a merged-in branch's side) cannot cap the
+		// receiving branch, whose own weight stands; there the anchor is a
+		// raise-only floor.
+		onOwnLine := c.onFirstParentLine(head.Hash, rs.nearestHash, mb.Hash, pool)
+		if !onOwnLine {
+			if less(out, anchor) {
+				c.logf("other: merged-in reference tag on %s raises core to %s", short(rs.nearestHash), anchor)
+				return anchor, rs.nearestRef.label, rs.nearestRef.counter + after.count, baseVPrefix, nil
+			}
+			c.logf("other: merged-in reference tag on %s (%s) below computed %s; branch weight stands", short(rs.nearestHash), anchor, out)
+			return out, "", n, baseVPrefix, nil
+		}
 		if !less(anchor, belowCore) {
 			counter := rs.nearestRef.counter + after.count
 			c.logf("other: reference tag on %s (%s-%s.%d) anchors core to %s; counter = %d + %d after = %d",
@@ -901,6 +1116,28 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	}
 
 	return out, "", n, baseVPrefix, nil
+}
+
+// onFirstParentLine reports whether target lies on the first-parent chain walked
+// from head down to (but not past) stop — i.e. target is on "this branch's own"
+// mainline rather than on a side branch that was merged in. The walk follows
+// only Parent(0) edges via the pool, so a commit reachable only through a merge's
+// second parent is not on the line.
+func (c *calculator) onFirstParentLine(head, target, stop plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) bool {
+	h := head
+	for {
+		if h == target {
+			return true
+		}
+		if h == stop {
+			return false
+		}
+		parents, ok := pool[h]
+		if !ok || len(parents) == 0 {
+			return false
+		}
+		h = parents[0]
+	}
 }
 
 // isFeatureBranch reports whether the branch's type prefix (before the first

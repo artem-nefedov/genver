@@ -241,6 +241,15 @@ func (h *harness) deleteBranch(branch string) {
 // want asserts givi's output for the current branch equals expect.
 func (h *harness) want(expect string) {
 	h.t.Helper()
+	if got := h.version(); got != expect {
+		branch, _ := h.g.headBranch()
+		h.t.Fatalf("on branch %q: got %q, want %q", branch, got, expect)
+	}
+}
+
+// version computes and returns givi's output for the current branch.
+func (h *harness) version() string {
+	h.t.Helper()
 	branch, err := h.g.headBranch()
 	if err != nil {
 		h.t.Fatalf("headBranch: %v", err)
@@ -261,9 +270,7 @@ func (h *harness) want(expect string) {
 	if err != nil {
 		h.t.Fatalf("version: %v", err)
 	}
-	if got != expect {
-		h.t.Fatalf("on branch %q: got %q, want %q", branch, got, expect)
-	}
+	return got
 }
 
 // release cuts a release: from develop, merge into main and tag it, then return

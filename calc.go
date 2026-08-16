@@ -18,6 +18,7 @@ type result struct {
 	isMain     bool
 	branch     string        // the branch the version was computed for
 	headHash   plumbing.Hash // HEAD commit the version was computed for
+	vPrefix    bool          // the boundary tag was "v"-prefixed; defaults output/tags to "v"
 }
 
 // version renders the full version string.
@@ -31,17 +32,19 @@ type boundary struct {
 	commit  *object.Commit
 	core    core
 	tagHash plumbing.Hash // the tagged commit this boundary came from (zero if untagged)
+	vPrefix bool          // the boundary's release tag is "v"-prefixed
 }
 
 // calculator holds the state needed to compute a version.
 type calculator struct {
-	g            *repo
-	boundaries   []boundary
-	boundaryCore map[plumbing.Hash]core          // boundary commit hash -> release core
-	tagCore      map[plumbing.Hash]core          // commit hash -> core of a tag on it
-	refs         map[plumbing.Hash]prereleaseRef // commit hash -> prerelease reference tag
-	conflicts    map[plumbing.Hash]error         // tagged commit hash -> ambiguity error (lazy)
-	trace        io.Writer                       // nil disables tracing
+	g          *repo
+	boundaries []boundary
+	boundaryAt map[plumbing.Hash]int           // boundary commit hash -> index into boundaries
+	tagCore    map[plumbing.Hash]core          // commit hash -> core of a tag on it
+	tagVPrefix map[plumbing.Hash]bool          // commit hash -> its release tag is "v"-prefixed
+	refs       map[plumbing.Hash]prereleaseRef // commit hash -> prerelease reference tag
+	conflicts  map[plumbing.Hash]error         // tagged commit hash -> ambiguity error (lazy)
+	trace      io.Writer                       // nil disables tracing
 }
 
 func newCalculator(g *repo) (*calculator, error) {
@@ -56,13 +59,14 @@ func newCalculatorTrace(g *repo, trace io.Writer) (*calculator, error) {
 	// Cache the tag maps once; they are consulted repeatedly. Release tags become
 	// boundaries; prerelease reference tags (with a trailing counter) pin an
 	// in-progress version; any other tag is ignored entirely and traced.
-	tc, refs, conflicts, err := g.tagCores(func(name string, perr error) {
+	tc, vpre, refs, conflicts, err := g.tagCores(func(name string, perr error) {
 		c.logf("ignoring tag %q: %v", name, perr)
 	})
 	if err != nil {
 		return nil, err
 	}
 	c.tagCore = tc
+	c.tagVPrefix = vpre
 	c.refs = refs
 	c.conflicts = conflicts
 	for h, pr := range refs {
@@ -72,7 +76,7 @@ func newCalculatorTrace(g *repo, trace io.Writer) (*calculator, error) {
 		c.logf("commit %s carries conflicting version tags (only an error if it is used)", short(h))
 	}
 
-	// developBoundaries populates c.boundaries and c.boundaryCore.
+	// developBoundaries populates c.boundaries and c.boundaryAt.
 	if _, err := c.developBoundaries(); err != nil {
 		return nil, err
 	}
@@ -129,20 +133,22 @@ func short(h plumbing.Hash) string {
 // root, which is inherently the cost of an untagged repository.
 //
 // The repository root is always a boundary (core 0.1.0, or a tag on it).
-// Boundaries are populated into c.boundaries / c.boundaryCore as the pass
+// Boundaries are populated into c.boundaries / c.boundaryAt as the pass
 // proceeds so that computing an untagged develop-release merge's core (via
 // developVersion) can rely on the earlier boundaries already registered.
 func (c *calculator) developBoundaries() ([]boundary, error) {
-	c.boundaryCore = map[plumbing.Hash]core{}
+	c.boundaryAt = map[plumbing.Hash]int{}
 	c.boundaries = nil
-	seen := map[plumbing.Hash]bool{}
 	add := func(bc *object.Commit, cr core, tagHash plumbing.Hash) {
-		if seen[bc.Hash] {
+		if _, seen := c.boundaryAt[bc.Hash]; seen {
 			return
 		}
-		seen[bc.Hash] = true
-		c.boundaries = append(c.boundaries, boundary{commit: bc, core: cr, tagHash: tagHash})
-		c.boundaryCore[bc.Hash] = cr
+		vpre := false
+		if !tagHash.IsZero() {
+			vpre = c.tagVPrefix[tagHash]
+		}
+		c.boundaryAt[bc.Hash] = len(c.boundaries)
+		c.boundaries = append(c.boundaries, boundary{commit: bc, core: cr, tagHash: tagHash, vPrefix: vpre})
 	}
 
 	// Cheap source: every semver tag is a boundary at its released tip. This
@@ -216,7 +222,7 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 		if c.isDevelopReleaseMerge(cm) {
 			// Release merge from develop: the core is develop's core at the
 			// merged tip, built on the boundaries registered so far.
-			dc, _, derr := c.developVersion(p)
+			dc, _, _, derr := c.developVersion(p)
 			if derr != nil {
 				return nil, derr
 			}
@@ -246,20 +252,31 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 
 // isBoundary reports the boundary core if x is itself a release boundary.
 func (c *calculator) isBoundary(x *object.Commit) (core, bool) {
-	cr, ok := c.boundaryCore[x.Hash]
-	return cr, ok
+	i, ok := c.boundaryAt[x.Hash]
+	if !ok {
+		return core{}, false
+	}
+	return c.boundaries[i].core, true
 }
 
 // boundaryConflictAt returns the ambiguity error for the boundary at commit hash
 // h, if that boundary came from an ambiguous tagged commit. Used when a boundary
 // commit is selected directly (e.g. develop HEAD is itself a boundary).
 func (c *calculator) boundaryConflictAt(h plumbing.Hash) error {
-	for i := range c.boundaries {
-		if c.boundaries[i].commit.Hash == h {
-			return c.conflictAt(c.boundaries[i].tagHash)
-		}
+	if i, ok := c.boundaryAt[h]; ok {
+		return c.conflictAt(c.boundaries[i].tagHash)
 	}
 	return nil
+}
+
+// boundaryVPrefixAt reports whether the boundary at commit hash h came from a
+// "v"-prefixed release tag. Used when a boundary commit is selected directly as
+// the version's base, so the caller can default the output spelling to it.
+func (c *calculator) boundaryVPrefixAt(h plumbing.Hash) bool {
+	if i, ok := c.boundaryAt[h]; ok {
+		return c.boundaries[i].vPrefix
+	}
+	return false
 }
 
 // conflictAt returns the ambiguity error for a tagged commit, or nil. It is
@@ -276,11 +293,12 @@ func (c *calculator) conflictAt(h plumbing.Hash) error {
 // commits reachable from the section's start but not from the release boundary
 // it builds on (equivalent to `git rev-list base..start`).
 type sectionScan struct {
-	baseCore core          // release core of the boundary the section builds on
-	baseHash plumbing.Hash // that boundary's commit hash
-	count    int           // number of commits in the section (base..start)
-	bump     bumpKind      // strongest version bump those commits imply
-	refFloor core          // highest prerelease-reference core within the section (zero if none)
+	baseCore    core          // release core of the boundary the section builds on
+	baseHash    plumbing.Hash // that boundary's commit hash
+	baseVPrefix bool          // the base boundary's release tag is "v"-prefixed
+	count       int           // number of commits in the section (base..start)
+	bump        bumpKind      // strongest version bump those commits imply
+	refFloor    core          // highest prerelease-reference core within the section (zero if none)
 }
 
 // scanSection determines the release boundary a commit builds on and analyses
@@ -334,6 +352,7 @@ func (c *calculator) scanSectionInPool(start plumbing.Hash, excludeStart bool, p
 		if !found || less(res.baseCore, b.core) {
 			res.baseCore = b.core
 			res.baseHash = b.commit.Hash
+			res.baseVPrefix = b.vPrefix
 			baseTagHash = b.tagHash
 			found = true
 		}
@@ -447,29 +466,32 @@ func (c *calculator) countAndBumpInPool(start plumbing.Hash, exclude map[plumbin
 	return count, bump, nil
 }
 
-// developVersion computes the (core, counter) for a develop commit.
-func (c *calculator) developVersion(head *object.Commit) (core, int, error) {
+// developVersion computes the (core, counter, base-"v"-prefix) for a develop
+// commit. The base-"v"-prefix reports whether the release boundary the version
+// builds on is spelled with a leading "v", so the caller can default the output
+// spelling to it.
+func (c *calculator) developVersion(head *object.Commit) (core, int, bool, error) {
 	// If HEAD is itself a release boundary, the current section is empty: keep
 	// the released core and report the previous section's commit count.
 	if bcore, ok := c.isBoundary(head); ok {
 		c.logf("develop: HEAD %s is itself a release boundary (%s); section is empty", short(head.Hash), bcore)
 		if err := c.boundaryConflictAt(head.Hash); err != nil {
-			return core{}, 0, err
+			return core{}, 0, false, err
 		}
 		scan, err := c.scanSection(head, true)
 		if err != nil {
 			// No lower boundary (HEAD is the root boundary): the section that
 			// ends here is empty, so the counter is 0.
 			c.logf("develop: no lower boundary; counter = 0")
-			return bcore, 0, nil
+			return bcore, 0, false, nil
 		}
 		c.logf("develop: previous boundary %s; counter = %d; core = %s", short(scan.baseHash), scan.count, bcore)
-		return bcore, scan.count, nil
+		return bcore, scan.count, scan.baseVPrefix, nil
 	}
 
 	scan, err := c.scanSection(head, false)
 	if err != nil {
-		return core{}, 0, err
+		return core{}, 0, false, err
 	}
 	out := scan.baseCore.bump(scan.bump)
 	if less(out, scan.refFloor) {
@@ -478,27 +500,31 @@ func (c *calculator) developVersion(head *object.Commit) (core, int, error) {
 	}
 	c.logf("develop: section starts at boundary %s (%s); bump = %s; %d commit(s); core %s -> %s",
 		short(scan.baseHash), scan.baseCore, scan.bump, scan.count, scan.baseCore, out)
-	return out, scan.count, nil
+	return out, scan.count, scan.baseVPrefix, nil
 }
 
-// mainVersion computes the release core for a commit on the main branch.
-func (c *calculator) mainVersion(head *object.Commit) (core, error) {
+// mainVersion computes the release core for a commit on the main branch, plus
+// whether the base tag it builds on is "v"-prefixed (so the caller can default
+// the output spelling to it).
+func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 	chain, err := c.g.firstParentChain(head)
 	if err != nil {
-		return core{}, err
+		return core{}, false, err
 	}
 
 	// Find the nearest tagged commit on the first-parent chain.
 	baseIdx := len(chain) - 1
 	baseCore := core{0, 1, 0} // root default
+	baseVPrefix := false      // no tag under the root: default stays bare
 	for i, cm := range chain {
 		if bcore, ok := c.tagCore[cm.Hash]; ok {
 			// This tag is the selected base: fail if the commit is ambiguous.
 			if err := c.conflictAt(cm.Hash); err != nil {
-				return core{}, err
+				return core{}, false, err
 			}
 			baseCore = bcore
 			baseIdx = i
+			baseVPrefix = c.tagVPrefix[cm.Hash]
 			break
 		}
 	}
@@ -526,11 +552,11 @@ func (c *calculator) mainVersion(head *object.Commit) (core, error) {
 			// the merged tip (second parent).
 			p, err := cm.Parent(1)
 			if err != nil {
-				return core{}, err
+				return core{}, false, err
 			}
-			dc, _, err := c.developVersion(p)
+			dc, _, _, err := c.developVersion(p)
 			if err != nil {
-				return core{}, err
+				return core{}, false, err
 			}
 			c.logf("main: release merge %s -> core from develop tip = %s", short(cm.Hash), dc)
 			cur = dc
@@ -543,7 +569,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, error) {
 			branch := mergedBranchName(cm)
 			bump, err := c.directMergeBump(cm)
 			if err != nil {
-				return core{}, err
+				return core{}, false, err
 			}
 			next := cur.bump(bump)
 			c.logf("main: direct merge of %q %s -> %s bump: %s -> %s", branch, short(cm.Hash), bump, cur, next)
@@ -553,7 +579,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, error) {
 			// release core when it is higher than the bumped core.
 			floor, err := c.directMergeRefFloor(cm)
 			if err != nil {
-				return core{}, err
+				return core{}, false, err
 			}
 			if less(cur, floor) {
 				c.logf("main: reference floor %s raises core above %s", floor, cur)
@@ -561,7 +587,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, error) {
 			}
 		}
 	}
-	return cur, nil
+	return cur, baseVPrefix, nil
 }
 
 // isDevelopReleaseMerge reports whether a merge commit on main is a release
@@ -701,14 +727,14 @@ func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Comm
 // normally-computed core, calculation continues from the tag — its core and
 // label are used, and the counter continues from the tag's counter plus the
 // commits made after it. When the computed core is higher, the tag is ignored.
-func (c *calculator) otherVersion(head *object.Commit, branch string) (core, string, int, error) {
+func (c *calculator) otherVersion(head *object.Commit, branch string) (core, string, int, bool, error) {
 	integrationTip, integration, err := c.integrationBranch()
 	if err != nil {
-		return core{}, "", 0, err
+		return core{}, "", 0, false, err
 	}
 	mb, err := c.forkBase(head, integrationTip)
 	if err != nil {
-		return core{}, "", 0, err
+		return core{}, "", 0, false, err
 	}
 	c.logf("other: fork point on %s is %s", integration, short(mb.Hash))
 
@@ -716,29 +742,32 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	// holds everything both the develop-section scan and the branch count need.
 	pool, err := c.g.parentPool(head.Hash)
 	if err != nil {
-		return core{}, "", 0, err
+		return core{}, "", 0, false, err
 	}
 
 	// Determine the release core the integration section builds on, and the bump
 	// that section has accumulated so far (at the fork point). A single
 	// section-scan handles both the boundary and non-boundary fork-point cases.
 	var belowCore core
+	baseVPrefix := false
 	sectionBump := bumpNone
 	if bcore, ok := c.isBoundary(mb); ok {
 		if err := c.boundaryConflictAt(mb.Hash); err != nil {
-			return core{}, "", 0, err
+			return core{}, "", 0, false, err
 		}
 		belowCore = bcore
+		baseVPrefix = c.boundaryVPrefixAt(mb.Hash)
 		c.logf("other: fork point is a release boundary (%s); %s section bump = none", bcore, integration)
 	} else {
 		scan, err := c.scanSectionInPool(mb.Hash, false, pool)
 		if err != nil {
-			return core{}, "", 0, err
+			return core{}, "", 0, false, err
 		}
 		if scan.baseHash.IsZero() {
-			return core{}, "", 0, fmt.Errorf("no release boundary found for commit %s", mb.Hash)
+			return core{}, "", 0, false, fmt.Errorf("no release boundary found for commit %s", mb.Hash)
 		}
 		belowCore = scan.baseCore
+		baseVPrefix = scan.baseVPrefix
 		sectionBump = scan.bump
 		c.logf("other: %s section starts at %s (%s); %s section bump = %s", integration, short(scan.baseHash), scan.baseCore, integration, sectionBump)
 	}
@@ -749,7 +778,7 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	mbSet := ancestorHashesIn(mb.Hash, pool)
 	n, branchBump, err := c.countAndBumpInPool(head.Hash, mbSet, pool)
 	if err != nil {
-		return core{}, "", 0, err
+		return core{}, "", 0, false, err
 	}
 	c.logf("other: branch's own commits bump = %s", branchBump)
 	eff := maxBump(sectionBump, branchBump)
@@ -764,19 +793,19 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	// A prerelease reference tag among the branch's own commits (mb..head) can
 	// take over when its core is at least as high as the computed core.
 	if ref, refHash, after, ok, rerr := c.nearestRef(head.Hash, mbSet, pool); rerr != nil {
-		return core{}, "", 0, rerr
+		return core{}, "", 0, false, rerr
 	} else if ok {
 		if less(out, ref.core) || out == ref.core {
 			counter := ref.counter + after
 			c.logf("other: reference tag on %s (%s-%s.%d) wins; counter = %d + %d after = %d",
 				short(refHash), ref.core, ref.label, ref.counter, ref.counter, after, counter)
-			return ref.core, ref.label, counter, nil
+			return ref.core, ref.label, counter, baseVPrefix, nil
 		}
 		c.logf("other: reference tag on %s (%s) is lower than computed core %s; ignored",
 			short(refHash), ref.core, out)
 	}
 
-	return out, "", n, nil
+	return out, "", n, baseVPrefix, nil
 }
 
 // nearestRef finds the prerelease reference tag nearest to head among the
@@ -848,25 +877,25 @@ func (c *calculator) Calculate(branch string, head *object.Commit) (result, erro
 	switch branch {
 	case "main", "master":
 		c.logf("branch classified as main (release)")
-		cr, err := c.mainVersion(head)
+		cr, vpre, err := c.mainVersion(head)
 		if err != nil {
 			return result{}, err
 		}
 		c.logf("result: %s (release)", cr)
-		return result{core: cr, isMain: true, branch: branch, headHash: head.Hash}, nil
+		return result{core: cr, isMain: true, branch: branch, headHash: head.Hash, vPrefix: vpre}, nil
 
 	case "develop":
 		c.logf("branch classified as develop")
-		cr, n, err := c.developVersion(head)
+		cr, n, vpre, err := c.developVersion(head)
 		if err != nil {
 			return result{}, err
 		}
 		c.logf("result: %s-alpha.%d", cr, n)
-		return result{core: cr, prerelease: fmt.Sprintf("alpha.%d", n), branch: branch, headHash: head.Hash}, nil
+		return result{core: cr, prerelease: fmt.Sprintf("alpha.%d", n), branch: branch, headHash: head.Hash, vPrefix: vpre}, nil
 
 	default:
 		c.logf("branch classified as other (feature/bugfix/etc.)")
-		cr, labelOverride, n, err := c.otherVersion(head, branch)
+		cr, labelOverride, n, vpre, err := c.otherVersion(head, branch)
 		if err != nil {
 			return result{}, err
 		}
@@ -881,6 +910,6 @@ func (c *calculator) Calculate(branch string, head *object.Commit) (result, erro
 			return result{}, fmt.Errorf("branch name %q produces an empty version label", branch)
 		}
 		c.logf("result: %s-%s.%d", cr, label, n)
-		return result{core: cr, prerelease: fmt.Sprintf("%s.%d", label, n), branch: branch, headHash: head.Hash}, nil
+		return result{core: cr, prerelease: fmt.Sprintf("%s.%d", label, n), branch: branch, headHash: head.Hash, vPrefix: vpre}, nil
 	}
 }

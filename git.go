@@ -170,7 +170,8 @@ func (g *repo) mainBranch() (*object.Commit, string, error) {
 }
 
 // tagCores maps a commit hash to the semver core of any release tag pointing at
-// it, and (separately) a commit hash to any prerelease "reference" tag on it.
+// it, whether that release tag is "v"-prefixed, and (separately) a commit hash
+// to any prerelease "reference" tag on it.
 //
 // A release tag is a bare release version (e.g. "v2.1.0"), which becomes a
 // calculation boundary. A prerelease reference tag carries a trailing numeric
@@ -188,9 +189,15 @@ func (g *repo) mainBranch() (*object.Commit, string, error) {
 // skipped, when non-nil, is called once for every tag that is ignored (with the
 // tag name and the reason), so callers can trace which tags were dropped.
 func (g *repo) tagCores(skipped func(name string, err error)) (
-	map[plumbing.Hash]core, map[plumbing.Hash]prereleaseRef, map[plumbing.Hash]error, error,
+	map[plumbing.Hash]core, map[plumbing.Hash]bool, map[plumbing.Hash]prereleaseRef, map[plumbing.Hash]error, error,
 ) {
 	out := map[plumbing.Hash]core{}
+	// vPrefix records, per commit, whether its selected release tag is spelled
+	// with a leading "v" (e.g. "v1.2.3"). When a commit carries both a
+	// "v"-prefixed and a bare release tag for the same version, the "v" form
+	// wins (true). It is consulted to default the output/tag format to the
+	// boundary tag's own spelling.
+	vPrefix := map[plumbing.Hash]bool{}
 	refs := map[plumbing.Hash]prereleaseRef{}
 	conflicts := map[plumbing.Hash]error{}
 
@@ -201,7 +208,7 @@ func (g *repo) tagCores(skipped func(name string, err error)) (
 
 	iter, err := g.r.Tags()
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("list tags: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("list tags: %w", err)
 	}
 	defer iter.Close()
 	err = iter.ForEach(func(ref *plumbing.Reference) error {
@@ -217,10 +224,17 @@ func (g *repo) tagCores(skipped func(name string, err error)) (
 		var id string
 		if c, perr := parseCore(name); perr == nil {
 			id = "release:" + c.String()
+			hasV := strings.HasPrefix(strings.TrimSpace(name), "v")
 			// Highest release wins on same-commit duplicates (only reached for
 			// equal ids after the conflict check below, so it stays the same).
 			if existing, ok := out[target]; !ok || less(existing, c) {
 				out[target] = c
+				// A strictly higher release resets the spelling decision to
+				// this tag's own.
+				vPrefix[target] = hasV
+			} else if existing == c && hasV {
+				// Same version as the winner and "v"-prefixed: "v" wins over bare.
+				vPrefix[target] = true
 			}
 		} else if pr, perr := parsePrereleaseRef(name); perr == nil {
 			id = fmt.Sprintf("ref:%s-%s.%d", pr.core, pr.label, pr.counter)
@@ -249,9 +263,9 @@ func (g *repo) tagCores(skipped func(name string, err error)) (
 		return nil
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
-	return out, refs, conflicts, nil
+	return out, vPrefix, refs, conflicts, nil
 }
 
 func less(a, b core) bool {

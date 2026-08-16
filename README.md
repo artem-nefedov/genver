@@ -38,6 +38,7 @@ Change "latest" to specific release to pin the version.
 
 - Self-contained statically-linked binary, doesn't rely on other executables
 - Fast
+- Can make a guess if "v" prefix needs to be added based on existing tags
 - Supports a few extra tricks, like formatting output and creating/pushing tags
 - Works only with the specific flow (see below)
 

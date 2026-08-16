@@ -18,14 +18,15 @@ Usage: givi [flag]
 
 Outputs a semantic version derived from the local git tree.
 With no flag it prints the version for the current branch and exits.
+Default is format is '{{.Full}}', or 'v{{.Full}}' if v-prefixed tag is found.
 
 Flags:
   --help              Show this help and exit.
   --version           Show givi's own version and exit.
   --format <tmpl>     Render the version through a template instead of printing
-                      the full version. <tmpl> is a Go template with exposed
-                      fields: .Full, .Core, .Major, .Minor, .Patch, .PreRelease,
-                      .Count, .HeadHash, .Branch. Allows usage of Sprig functions
+                      the default. <tmpl> is a Go template with exposed fields:
+                      .Full, .Core, .Major, .Minor, .Patch, .PreRelease, .Count,
+                      .HeadHash, .Branch. Allows usage of Sprig functions
                       (only hermetic by default). Doesn't affect tag.
   --tag-format <tmpl> Like --format, but only affects the tag by --tag-main.
   --write-to <tmpl>   Also write the output (honoring --format) to one or more
@@ -79,6 +80,11 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return err
 	}
 
+	if fs.NArg() > 0 {
+		fmt.Fprint(out, usage + "\n")
+		return fmt.Errorf("unexpected positional argument: %q", fs.Arg(0))
+	}
+
 	// --help takes priority over everything.
 	if *showHelp {
 		fmt.Fprint(out, usage)
@@ -128,18 +134,29 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return err
 	}
 
-	// v is the full computed version, the default for both the tag and the
-	// printed output.
+	// v is the full computed version. defaultVal is the value used for the tag
+	// and the printed output when no explicit --tag-format / --format is given:
+	// it inherits the boundary tag's own spelling, so a repository tagged with
+	// a leading "v" (e.g. "v1.2.3") keeps the "v" by default, while an untagged
+	// or bare-tagged repository stays bare. An explicit template always wins.
 	v, err := res.version()
 	if err != nil {
 		return err
 	}
+	var defaultVal string
+	if res.vPrefix {
+		defaultVal = "v" + v
+	} else {
+		defaultVal = v
+	}
 
-	// tagVal is what --tag-main tags with and --push-tag-to pushes. Only
-	// --tag-format reshapes it; a plain --format leaves the tag as the full
-	// version.
-	tagVal := v
-	if *tagFormatTmpl != "" {
+	// tagVal is what --tag-main tags with and --push-tag-to pushes. --tag-format
+	// reshapes it explicitly; otherwise it defaults to the boundary-inherited
+	// spelling.
+	var tagVal string
+	if *tagFormatTmpl == "" {
+		tagVal = defaultVal
+	} else {
 		tagVal, err = res.renderFormat(*tagFormatTmpl, *allowNonHerm)
 		if err != nil {
 			return err
@@ -178,8 +195,10 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		}
 	}
 
-	outText := v
-	if *formatTmpl != "" {
+	var outText string
+	if *formatTmpl == "" {
+		outText = defaultVal
+	} else {
 		outText, err = res.renderFormat(*formatTmpl, *allowNonHerm)
 		if err != nil {
 			return err

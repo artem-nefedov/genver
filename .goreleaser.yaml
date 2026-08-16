@@ -28,8 +28,8 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      # {{ .Version }} resolves to COMPUTED_VERSION (givi's own version).
-      - -s -w -X main.version={{ .Version }}
+      # {{ .Version }} resolves to COMPUTED_VERSION without "v" prefix.
+      - -s -w -X main.version=v{{ .Version }}
     goos:
       - linux
       - darwin

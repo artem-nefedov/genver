@@ -90,8 +90,10 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return nil
 	}
 
-	// --push-tag-to only makes sense together with --tag-main; using it alone is
-	// a usage error rather than a silent no-op.
+	if *tagFormatTmpl != "" && !*tagMain {
+		return fmt.Errorf("--tag-format requires --tag-main")
+	}
+
 	if *pushTagTo != "" && !*tagMain {
 		return fmt.Errorf("--push-tag-to requires --tag-main")
 	}

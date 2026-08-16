@@ -100,12 +100,32 @@ func TestTagFormatWriteTo(t *testing.T) {
 	h := newHarness(t)
 	h.commit("root") // main = 0.1.0
 
-	out, err := runCapture(t, h, "--tag-format", "v{{.Full}}", "--write-to", "version.txt")
+	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}", "--write-to", "version.txt")
 	if err != nil || out != "0.1.0" {
 		t.Fatalf("--tag-format --write-to: out=%q err=%v", out, err)
 	}
 	if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "0.1.0" {
 		t.Errorf("write-to content = %q, want %q", got, "0.1.0")
+	}
+}
+
+// TestTagFormatRequiresTagMain asserts --tag-format without --tag-main is a
+// usage error (not a silent no-op), and that nothing is tagged as a result.
+func TestTagFormatRequiresTagMain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root")
+
+	_, _, err := runCaptureAll(t, h, "--tag-format", "v{{.Full}}")
+	if err == nil {
+		t.Fatal("expected error for --tag-format without --tag-main")
+	}
+	if !strings.Contains(err.Error(), "requires --tag-main") {
+		t.Errorf("unexpected error: %v", err)
+	}
+	// No tag should have been created.
+	if _, err := h.g.r.Reference(plumbing.NewTagReferenceName("0.1.0"), false); err == nil {
+		t.Error("tag 0.1.0 was created despite the usage error")
 	}
 }
 

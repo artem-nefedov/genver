@@ -287,7 +287,7 @@ func TestScenarioDevelopMergedIntoFeatureKeepsMinor(t *testing.T) {
 }
 
 // mustHead returns the current HEAD commit hash, failing the test on error.
-func mustHead(t *testing.T, h *harness) plumbing.Hash {
+func mustHead(t testing.TB, h *harness) plumbing.Hash {
 	t.Helper()
 	head, err := h.g.headCommit()
 	if err != nil {

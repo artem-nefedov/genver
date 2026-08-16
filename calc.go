@@ -316,8 +316,13 @@ type sectionScan struct {
 	// raise the computed core, refAnchor REPLACES the section's own bump (so a
 	// reference tag can pull the core back down), bounded from below by baseCore
 	// (a reference tag can never sink the section below the release it builds on).
+	// refBase is the tag's OWN core before any after-tag lift; the anchor is only
+	// relevant when refBase (not the lifted refAnchor) is at least as high as
+	// baseCore, so a stale tag below the current release line cannot be lifted
+	// above it and hijack the section.
 	hasRef    bool
 	refAnchor core
+	refBase   core
 }
 
 // scanSection determines the release boundary a commit builds on and analyses
@@ -405,6 +410,7 @@ func (c *calculator) scanSectionInPool(start plumbing.Hash, excludeStart bool, p
 			return sectionScan{}, aerr
 		}
 		res.hasRef = true
+		res.refBase = rs.nearestRef.core
 		res.refAnchor = rs.nearestRef.core.bump(lift)
 	}
 	return res, nil
@@ -527,14 +533,33 @@ func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bo
 
 // anchorLiftBump returns the explicit bump that lifts a reference anchor: the
 // strongest EXPLICIT signal ("+semver:" directive or feature merge) on commits
-// reachable from start but not from the anchor commit anchorHash (i.e. commits
-// after the tag). A feature merge contributes minor only if the branch it
+// that are genuine DESCENDANTS of the anchor commit anchorHash — i.e. commits
+// that build ON TOP of the tag, reachable from start with the anchor among their
+// ancestors. Commits reachable from start but merely PARALLEL to the anchor
+// (independent work on another line, e.g. feature merges that landed on develop
+// while the tagged branch was being developed) are NOT "after the tag" and do
+// not lift it. A feature merge contributes minor only if the branch it
 // integrates itself resolves to minor-or-higher; a feature branch that a
 // reference tag capped to patch (with nothing restoring it) contributes only
 // patch, exactly like a bugfix merge — so merging such a branch does not undo
 // its own patch decision. An explicit "+semver:" on any commit still applies.
+//
+// The merge that INTEGRATES the anchored branch itself does not re-apply its
+// implicit feature-minor: when the anchor tag sits on the FIRST-PARENT chain of
+// the merge's merged-in side (i.e. the tag is that branch's own final version,
+// as with a "1.2.3-foo.5" tag on a feature branch merged into develop), the
+// feature-merge weight is the same work the anchor already reflects. Counting it
+// would double-apply the bump and jump 1.2.3 -> 1.3.0. Only the implicit
+// feature-minor is suppressed for such a merge: an explicit "+semver:" directive
+// on the merge message is a deliberate override and still lifts, and a nested
+// feature merge that brought in an independent branch (the anchor is NOT on the
+// merged side's first-parent chain) keeps its full weight.
 func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) (bumpKind, error) {
 	afterExclude := ancestorHashesIn(anchorHash, pool)
+	// desc answers "is the anchor an ancestor of h?" (i.e. h builds on the tag),
+	// memoized once and reused by both the lift walk and integratesAnchor so the
+	// anchor's ancestor set is never recomputed per merge.
+	desc := newAncestorMemo(anchorHash, pool)
 	seen := map[plumbing.Hash]bool{}
 	stack := []plumbing.Hash{start}
 	bump := bumpNone
@@ -549,14 +574,23 @@ func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[pl
 		if !ok {
 			continue
 		}
-		if bump < bumpMajor {
+		// Only commits built on top of the tag can lift it; parallel independent
+		// work does not.
+		if bump < bumpMajor && desc.reaches(h) {
 			commit, err := c.g.r.CommitObject(h)
 			if err != nil {
 				return bumpNone, err
 			}
-			b, berr := c.explicitCommitBump(commit)
-			if berr != nil {
-				return bumpNone, berr
+			var b bumpKind
+			if len(parents) >= 2 && c.integratesAnchor(parents, anchorHash, desc, pool) {
+				// This merge integrates the anchored branch directly: honor its
+				// explicit "+semver:" directive but not its implicit feature-minor.
+				b = c.msgBump(commit)
+			} else {
+				b, err = c.explicitCommitBump(commit)
+				if err != nil {
+					return bumpNone, err
+				}
 			}
 			bump = max(bump, b)
 		}
@@ -567,6 +601,75 @@ func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[pl
 		}
 	}
 	return bump, nil
+}
+
+// ancestorMemo answers, lazily and with memoization, whether a fixed target
+// commit is an ancestor of a queried commit within a parent pool. Reusing a
+// single memo across many queries avoids recomputing (and re-allocating) the
+// target's full ancestor set per query.
+type ancestorMemo struct {
+	target plumbing.Hash
+	pool   map[plumbing.Hash][]plumbing.Hash
+	cache  map[plumbing.Hash]bool
+}
+
+func newAncestorMemo(target plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) *ancestorMemo {
+	return &ancestorMemo{target: target, pool: pool, cache: map[plumbing.Hash]bool{}}
+}
+
+// reaches reports whether the memo's target is h itself or an ancestor of h.
+func (m *ancestorMemo) reaches(h plumbing.Hash) bool {
+	if h == m.target {
+		return true
+	}
+	if v, ok := m.cache[h]; ok {
+		return v
+	}
+	m.cache[h] = false // break potential cycles (a DAG has none, but be safe)
+	res := false
+	for _, ph := range m.pool[h] {
+		if m.reaches(ph) {
+			res = true
+			break
+		}
+	}
+	m.cache[h] = res
+	return res
+}
+
+// integratesAnchor reports whether a merge with the given parents directly
+// integrates the anchored branch: the anchor commit is on the FIRST-PARENT chain
+// of one of the merged-in parents (second or beyond) but not reachable from the
+// first parent. That means the anchor tag is the merged branch's own final
+// version, so the merge's implicit feature-minor must not re-lift it. The shared
+// ancestor memo answers the first-parent reachability test without allocating a
+// fresh ancestor set.
+func (c *calculator) integratesAnchor(parents []plumbing.Hash, anchorHash plumbing.Hash, desc *ancestorMemo, pool map[plumbing.Hash][]plumbing.Hash) bool {
+	if desc.reaches(parents[0]) {
+		return false // anchor also reachable via the first parent: mainline anchor
+	}
+	for _, ph := range parents[1:] {
+		if firstParentChainContains(ph, anchorHash, pool) {
+			return true
+		}
+	}
+	return false
+}
+
+// firstParentChainContains walks the first-parent chain from start and reports
+// whether it reaches target.
+func firstParentChainContains(start, target plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) bool {
+	h := start
+	for {
+		if h == target {
+			return true
+		}
+		parents, ok := pool[h]
+		if !ok || len(parents) == 0 {
+			return false
+		}
+		h = parents[0]
+	}
 }
 
 // explicitCommitBump is the strongest EXPLICIT bump a single commit contributes:
@@ -699,12 +802,12 @@ func (c *calculator) computeCeilings(start plumbing.Hash, exclude map[plumbing.H
 // baseCore always bounds the result from below: a reference tag can never sink
 // the section beneath the release it builds on.
 func (s sectionScan) core(extraBump bumpKind) core {
-	if s.hasRef {
-		anchor := s.refAnchor.bump(extraBump)
-		if !less(anchor, s.baseCore) {
-			// anchor >= baseCore: the tag anchors the core.
-			return anchor
-		}
+	if s.hasRef && !less(s.refBase, s.baseCore) {
+		// The tag's OWN core is at or above the base release, so it anchors the
+		// section (a stale tag below the current release line is ignored here so
+		// an after-tag lift cannot raise it above the boundary and hijack the
+		// section).
+		return s.refAnchor.bump(extraBump)
 	}
 	out := s.baseCore.bump(max(s.bump, extraBump))
 	if less(out, s.refFloor) {
@@ -926,6 +1029,7 @@ func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error)
 		}
 		scan.hasRef = true
 		scan.refAnchor = selfRef.core
+		scan.refBase = selfRef.core
 		scan.refFloor = selfRef.core
 		return scan.core(bumpNone), nil
 	}
@@ -936,6 +1040,7 @@ func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error)
 		}
 		scan.hasRef = true
 		scan.refAnchor = rs.nearestRef.core.bump(lift)
+		scan.refBase = rs.nearestRef.core
 		scan.refFloor = rs.nearestRef.core
 	}
 	return scan.core(bumpNone), nil
@@ -1105,14 +1210,14 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 			c.logf("other: merged-in reference tag on %s (%s) below computed %s; branch weight stands", short(rs.nearestHash), anchor, out)
 			return out, "", n, baseVPrefix, nil
 		}
-		if !less(anchor, belowCore) {
+		if !less(rs.nearestRef.core, belowCore) {
 			counter := rs.nearestRef.counter + after.count
 			c.logf("other: reference tag on %s (%s-%s.%d) anchors core to %s; counter = %d + %d after = %d",
 				short(rs.nearestHash), rs.nearestRef.core, rs.nearestRef.label, rs.nearestRef.counter, anchor, rs.nearestRef.counter, after.count, counter)
 			return anchor, rs.nearestRef.label, counter, baseVPrefix, nil
 		}
-		c.logf("other: reference tag on %s (anchor %s) is below base boundary %s; ignored",
-			short(rs.nearestHash), anchor, belowCore)
+		c.logf("other: reference tag on %s (core %s, anchor %s) is below base boundary %s; ignored",
+			short(rs.nearestHash), rs.nearestRef.core, anchor, belowCore)
 	}
 
 	return out, "", n, baseVPrefix, nil

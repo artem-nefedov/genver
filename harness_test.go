@@ -22,20 +22,20 @@ import (
 // output at each step of the TASK.md worked example. The repository is backed
 // entirely by an in-memory filesystem, so tests never touch disk.
 type harness struct {
-	t   *testing.T
+	t   testing.TB
 	g   *repo
 	wt  *git.Worktree
 	wfs billy.Filesystem // in-memory target for --write-to output
 	n   int              // monotonic counter for unique commit content and timestamps
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t testing.TB) *harness {
 	return newHarnessNamed(t, "main")
 }
 
 // newHarnessNamed builds a harness whose permanent release branch is `mainName`
 // ("main" or "master"), so both permanent-branch names can be exercised.
-func newHarnessNamed(t *testing.T, mainName string) *harness {
+func newHarnessNamed(t testing.TB, mainName string) *harness {
 	t.Helper()
 	// Back both the object store and the worktree with in-memory filesystems.
 	// The storer is a *filesystem.Storage (not a bare in-memory storer) so that

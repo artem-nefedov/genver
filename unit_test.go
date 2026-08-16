@@ -1078,6 +1078,155 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.want("2.0.0-alpha.6")
 	})
 
+	// An independent feature merge that landed on develop's mainline PARALLEL to
+	// the tagged branch (neither is an ancestor of the other) is not "after the
+	// tag" and must not lift the anchor. Here feature/foo is tagged 1.2.3-foo.5
+	// on a side branch while feature/par is merged into develop in parallel; when
+	// feature/foo is merged the version stays 1.2.3, not 1.3.0.
+	t.Run("ParallelFeatureMergeDoesNotLiftAnchor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("0.56.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		// feature/foo forks and is tagged, with a plain commit after the tag.
+		h.newBranch("feature/foo")
+		h.commit("ff1")
+		h.tag("1.2.3-foo.5", mustHead(t, h))
+		h.commit("ff2")
+
+		// Meanwhile an independent feature branch is merged into develop.
+		h.checkout("develop")
+		h.newBranch("feature/par")
+		h.commit("p1")
+		h.checkout("develop")
+		h.merge("feature/par")
+
+		// Merging the tagged branch keeps 1.2.3: the parallel feature merge does
+		// not lift it.
+		h.merge("feature/foo")
+		h.want("1.2.3-alpha.7")
+
+		// But a feature merge that lands AFTER the anchor (a descendant of the tag
+		// merge) DOES lift it to a minor: 1.3.0.
+		h.newBranch("feature/next")
+		h.commit("n1")
+		h.checkout("develop")
+		h.merge("feature/next")
+		h.want("1.3.0-alpha.9")
+	})
+
+	// When the anchor stays at 1.2.3 (a parallel feature merge did not lift it),
+	// releasing develop into main publishes exactly 1.2.3 — the release inherits
+	// the un-lifted anchored core.
+	t.Run("UnliftedAnchorReleasesAsPatch", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("0.56.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		// feature/foo forks and is tagged, with a plain commit after the tag.
+		h.newBranch("feature/foo")
+		h.commit("ff1")
+		h.tag("1.2.3-foo.5", mustHead(t, h))
+		h.commit("ff2")
+
+		// An independent feature branch is merged into develop in parallel.
+		h.checkout("develop")
+		h.newBranch("feature/par")
+		h.commit("p1")
+		h.checkout("develop")
+		h.merge("feature/par")
+
+		// Merging the tagged branch keeps 1.2.3 (parallel merge does not lift).
+		h.merge("feature/foo")
+		h.want("1.2.3-alpha.7")
+
+		// Releasing develop into main publishes the un-lifted anchor: 1.2.3.
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.2.3")
+	})
+
+	// A feature merge after the tag lifts the anchor to minor regardless of when
+	// the independent branch was CREATED (before or after the tagged branch) —
+	// what matters is that it is merged AFTER the anchor (as its descendant), not
+	// its fork point. Here the independent branch is created BEFORE the tagged
+	// branch but merged after it.
+	t.Run("IndependentFeatureCreatedBeforeMergedAfterLifts", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("0.56.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		// Independent feature branch created FIRST, left unmerged for now.
+		h.newBranch("feature/par")
+		h.commit("p1")
+
+		// feature/foo created and tagged, then merged to establish the anchor.
+		h.checkout("develop")
+		h.newBranch("feature/foo")
+		h.commit("ff1")
+		h.tag("1.2.3-foo.5", mustHead(t, h))
+		h.commit("ff2")
+		h.checkout("develop")
+		h.merge("feature/foo")
+		h.want("1.2.3-alpha.5") // anchor established
+
+		// Now merge the older independent branch: it lands after the anchor and
+		// lifts to minor.
+		h.merge("feature/par")
+		h.want("1.3.0-alpha.7")
+	})
+
+	// The same, but the independent branch is created AFTER the tagged branch was
+	// merged. It still lifts to minor.
+	t.Run("IndependentFeatureCreatedAfterMergedAfterLifts", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("0.56.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("feature/foo")
+		h.commit("ff1")
+		h.tag("1.2.3-foo.5", mustHead(t, h))
+		h.commit("ff2")
+		h.checkout("develop")
+		h.merge("feature/foo")
+		h.want("1.2.3-alpha.5") // anchor established
+
+		// Independent feature branch created AFTER feature/foo was merged.
+		h.newBranch("feature/par")
+		h.commit("p1")
+		h.checkout("develop")
+		h.merge("feature/par")
+		h.want("1.3.0-alpha.7")
+	})
+
 	// Multiple raise signals after the tag still lift the anchor only ONCE: the
 	// strongest single bump applies, extra signals of the same or lower strength
 	// only advance the counter. Here two feature merges and a "+semver: minor"
@@ -1390,6 +1539,42 @@ func TestReferenceTagPatchPropagation(t *testing.T) {
 		h.checkout("main")
 		h.merge("develop")
 		h.want("1.2.3") // patch release
+	})
+
+	// A reference tag that sits on a feature branch and is NOT its tip (there are
+	// plain commits after it on the same branch) is the branch's own final
+	// version. Merging that branch into develop must keep the anchored core: the
+	// feature merge's implicit minor is the same work the tag already reflects, so
+	// it must not re-lift 1.2.3 -> 1.3.0. The release then also stays 1.2.3.
+	t.Run("RefTagOnFeatureBranchHeldThroughMerge", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/foo")
+		h.commit("f1")
+		h.tag("1.2.3-foo.5", mustHead(t, h))
+		h.commit("f2") // plain commit after the tag: counter only
+		h.want("1.2.3-foo.6")
+		h.checkout("develop")
+		h.merge("feature/foo") // plain feature merge integrating the tagged branch
+		h.want("1.2.3-alpha.5") // stays 1.2.3, NOT 1.3.0
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.2.3")
+	})
+
+	// The same topology, but the integrating merge carries an explicit
+	// "+semver: minor": that deliberate override still lifts the anchor to 1.3.0,
+	// unlike the implicit feature-merge minor which is suppressed.
+	t.Run("ExplicitSemverOnIntegratingMergeStillLifts", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+		h.newBranch("feature/foo")
+		h.commit("f1")
+		h.tag("1.2.3-foo.5", mustHead(t, h))
+		h.commit("f2")
+		h.checkout("develop")
+		h.mergeMsg("feature/foo", "Merge branch 'feature/foo'\n\n+semver: minor")
+		h.want("1.3.0-alpha.5") // explicit directive overrides the held anchor
 	})
 
 	// A "+semver: minor" on the develop merge commit overrides the inherited

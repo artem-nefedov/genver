@@ -1713,9 +1713,10 @@ func TestFormat(t *testing.T) {
 		}
 	})
 
-	// SHA exposes the full 40-char HEAD commit hash. The short hash is obtained
-	// in-template with Sprig's substr, e.g. {{substr 0 8 .SHA}}. Both must equal
-	// the actual HEAD hash of the repo the version was computed for.
+	// HeadHash exposes the full 40-char HEAD commit hash. The short hash is
+	// obtained in-template with Sprig's substr, e.g. {{substr 0 8 .HeadHash}}.
+	// Both must equal the actual HEAD hash of the repo the version was computed
+	// for.
 	t.Run("ShaVariables", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -1724,17 +1725,17 @@ func TestFormat(t *testing.T) {
 		head := h.commit("d1")
 		want := head.String()
 
-		if out, err := runCapture(t, h, "--format", "{{.SHA}}"); err != nil || out != want {
-			t.Errorf("sha: out=%q err=%v, want %q", out, err, want)
+		if out, err := runCapture(t, h, "--format", "{{.HeadHash}}"); err != nil || out != want {
+			t.Errorf("hash: out=%q err=%v, want %q", out, err, want)
 		}
-		// Sprig's substr abbreviates the SHA: {{substr 0 8 .SHA}} is the 8-char
-		// short hash.
-		if out, err := runCapture(t, h, "--format", "{{substr 0 8 .SHA}}"); err != nil || out != want[:8] {
-			t.Errorf("short sha via substr: out=%q err=%v, want %q", out, err, want[:8])
+		// Sprig's substr abbreviates the hash: {{substr 0 8 .HeadHash}} is the
+		// 8-char short hash.
+		if out, err := runCapture(t, h, "--format", "{{substr 0 8 .HeadHash}}"); err != nil || out != want[:8] {
+			t.Errorf("short hash via substr: out=%q err=%v, want %q", out, err, want[:8])
 		}
-		// A realistic image tag combining version and short sha.
-		if out, err := runCapture(t, h, "--format", "{{.Core}}-{{substr 0 8 .SHA}}"); err != nil || out != "0.1.1-"+want[:8] {
-			t.Errorf("core+short sha: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
+		// A realistic image tag combining version and short hash.
+		if out, err := runCapture(t, h, "--format", "{{.Core}}-{{substr 0 8 .HeadHash}}"); err != nil || out != "0.1.1-"+want[:8] {
+			t.Errorf("core+short hash: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
 		}
 	})
 

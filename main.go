@@ -25,7 +25,7 @@ Flags:
   --format <tmpl>     Render the version through a template instead of printing
                       the full version. <tmpl> is a Go template with exposed
                       fields: .Full, .Core, .Major, .Minor, .Patch, .PreRelease,
-                      .Count, .SHA, .Branch. Allows usage of Sprig functions
+                      .Count, .HeadHash, .Branch. Allows usage of Sprig functions
                       (only hermetic by default). Doesn't affect tag.
   --tag-format <tmpl> Same as --format, but also affects tag by --tag-main.
   --write-to <tmpl>   Also write the output (honoring --format) to one or more

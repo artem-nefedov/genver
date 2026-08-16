@@ -23,7 +23,7 @@ import (
 //	Minor       the core's minor component as an integer, e.g. 2
 //	Patch       the core's patch component as an integer, e.g. 3
 //	Branch      the exact name of the branch, e.g. "feature/cool-abc"
-//	SHA         the full HEAD commit hash (40 hex chars)
+//	HeadHash    the full HEAD commit hash (40 hex chars)
 type formatVars struct {
 	Full       string
 	Core       string
@@ -33,7 +33,7 @@ type formatVars struct {
 	Minor      uint64
 	Patch      uint64
 	Branch     string
-	SHA        string
+	HeadHash   string
 }
 
 // renderFormat expands a --format template into the final output string. The
@@ -68,7 +68,7 @@ func (r result) renderFormat(tmpl string, allowNonHermetic bool) (string, error)
 		Minor:      r.core.minor,
 		Patch:      r.core.patch,
 		Branch:     r.branch,
-		SHA:        r.headHash.String(),
+		HeadHash:   r.headHash.String(),
 	}
 
 	var funcs template.FuncMap

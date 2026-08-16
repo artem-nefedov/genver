@@ -33,7 +33,7 @@ jobs:
           echo "LICENSE copyright year is ${year}."
 
       - name: Vet
-        run: make vet
+        run: go vet ./...
 
       - name: Test
         run: make test

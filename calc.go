@@ -210,7 +210,7 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 			// unless overridden). The commit itself is a release boundary at that
 			// core, so a develop branched from (or that merges) this point on main
 			// builds on the main core here rather than falling back to the root.
-			cur = cur.bump(maxBump(bumpPatch, bumpFromMessage(cm.Message)))
+			cur = cur.bump(max(bumpPatch, bumpFromMessage(cm.Message)))
 			add(cm, cur, plumbing.ZeroHash)
 			continue
 		}
@@ -451,11 +451,11 @@ func (c *calculator) countAndBumpInPool(start plumbing.Hash, exclude map[plumbin
 			if err != nil {
 				return 0, bumpNone, err
 			}
-			b := maxBump(bumpPatch, bumpFromMessage(commit.Message))
+			b := max(bumpPatch, bumpFromMessage(commit.Message))
 			if isFeatureMerge(commit) {
-				b = maxBump(b, bumpMinor)
+				b = max(b, bumpMinor)
 			}
-			bump = maxBump(bump, b)
+			bump = max(bump, b)
 		}
 		for _, ph := range parents {
 			if !seen[ph] && !exclude[ph] {
@@ -542,7 +542,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 		switch {
 		case cm.NumParents() < 2:
 			// Direct commit on main: patch bump unless overridden.
-			bump := maxBump(bumpPatch, bumpFromMessage(cm.Message))
+			bump := max(bumpPatch, bumpFromMessage(cm.Message))
 			next := cur.bump(bump)
 			c.logf("main: direct commit %s -> %s bump: %s -> %s", short(cm.Hash), bump, cur, next)
 			cur = next
@@ -630,7 +630,7 @@ func (c *calculator) directMergeBump(cm *object.Commit) (bumpKind, error) {
 	if err != nil {
 		return bumpNone, err
 	}
-	return maxBump(floor, rangeBump), nil
+	return max(floor, rangeBump), nil
 }
 
 // directMergeRefFloor returns the highest prerelease-reference core among the
@@ -781,9 +781,9 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 		return core{}, "", 0, false, err
 	}
 	c.logf("other: branch's own commits bump = %s", branchBump)
-	eff := maxBump(sectionBump, branchBump)
+	eff := max(sectionBump, branchBump)
 	if isFeatureBranch(branch) {
-		eff = maxBump(eff, bumpMinor) // feature increment takes precedence
+		eff = max(eff, bumpMinor) // feature increment takes precedence
 		c.logf("other: feature branch -> effective bump forced to at least minor")
 	}
 

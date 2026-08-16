@@ -20,13 +20,6 @@ const (
 	bumpMajor                 // a.b.c -> (a+1).0.0
 )
 
-func maxBump(a, b bumpKind) bumpKind {
-	if a > b {
-		return a
-	}
-	return b
-}
-
 func (k bumpKind) String() string {
 	switch k {
 	case bumpMajor:

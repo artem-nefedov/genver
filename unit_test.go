@@ -380,6 +380,638 @@ func TestAnnotatedTags(t *testing.T) {
 	})
 }
 
+// TestNonSemverTagsIgnored verifies that tags whose names do not parse as semver
+// are completely ignored during calculation: they never become a release
+// boundary on main or develop, and they never shadow a real semver tag on the
+// same commit. Only the lenient parser's rejects are exercised here — anything
+// the parser accepts (including a leading "v") is intentionally still honored.
+func TestNonSemverTagsIgnored(t *testing.T) {
+	t.Parallel()
+
+	// Tag names the lenient parser rejects; none of these may influence the
+	// computed version.
+	badTags := []string{"latest", "release-1", "foo", "1.x", "1.2.3-", "v", "nightly-2024"}
+
+	// On main: a proper release tag sets the version; adding non-semver tags on
+	// the same released commit leaves the version unchanged.
+	t.Run("MainBoundaryUnaffected", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.want("2.1.0")
+
+		for _, bad := range badTags {
+			h.tag(bad, mg)
+		}
+		h.want("2.1.0") // still the only real tag's version
+	})
+
+	// A non-semver tag sitting on a commit with NO real semver tag must not act
+	// as a boundary: the release core still falls back to the nearest real tag
+	// below it (here, the 0.1.0 root default with patch bumps on main).
+	t.Run("NonSemverTagIsNotABoundary", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main root -> 0.1.0
+		c1 := h.commit("m1")
+		h.tag("nightly-2024", c1) // non-semver: must be ignored
+		h.commit("m2")
+		// Two direct commits above the untagged 0.1.0 root -> 0.1.2. If the
+		// non-semver tag were wrongly treated as a boundary, this would differ.
+		h.want("0.1.2")
+	})
+
+	// On develop: a non-semver tag on the released tip must not be mistaken for
+	// the release boundary. develop keeps building on the real semver release.
+	t.Run("DevelopBoundaryUnaffected", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.tag("latest", mg) // non-semver, on the same released tip
+
+		h.checkout("develop")
+		h.want("2.1.0-alpha.1") // no new commits since the real release
+		h.commit("d2")
+		h.want("2.1.1-alpha.1") // next section builds on 2.1.0, not "latest"
+	})
+
+	// A non-semver tag must never shadow a real semver tag on the same commit,
+	// regardless of tag creation order.
+	t.Run("DoesNotShadowRealTag", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("bogus", mg) // non-semver first
+		h.tag("3.4.5", mg) // real semver second
+		h.tag("zzz", mg)   // and another non-semver after
+		h.want("3.4.5")
+	})
+
+	// The ignored tags are traced (observable via --debug), so a dropped tag is
+	// never silent.
+	t.Run("IgnoredTagsAreTraced", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.tag("not-semver", mg)
+
+		_, stderr, err := runCaptureAll(t, h, "--debug")
+		if err != nil {
+			t.Fatalf("--debug: %v", err)
+		}
+		if !strings.Contains(stderr, `ignoring tag "not-semver"`) {
+			t.Errorf("expected trace to report the ignored tag; got:\n%s", stderr)
+		}
+	})
+
+	// A pile of every kind of ignored / malformed tag (non-semver, partial,
+	// leading-zero, counter-less prerelease, empty-ish) must never abort the run:
+	// the app finishes successfully and reports the version from the one real
+	// release tag. This is the "ignored tags never prevent calculation" guarantee.
+	t.Run("PileOfBadTagsStillSucceeds", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.2.0", c1) // the one real release
+		junk := []string{
+			"latest", "foo", "release-99", "1.x", "1.2.3-",
+			"v2", "2", "2.1", "v2.1", "1.2", // partial versions
+			"01.2.3", "2020.01.15", "007.0.0", // leading zeros
+			"1.2.3-rc", "9.9.9-beta", // prereleases without a counter
+			"nightly", "HEAD-ish", "build_42",
+		}
+		for _, j := range junk {
+			h.tag(j, c1)
+		}
+		h.commit("m2")
+
+		out, _, err := runCaptureAll(t, h)
+		if err != nil {
+			t.Fatalf("run with many bad tags must succeed, got error: %v", err)
+		}
+		if out != "1.2.1" {
+			t.Errorf("version with many bad tags = %q, want 1.2.1", out)
+		}
+	})
+}
+
+// TestStrictTagParsing verifies that tag parsing uses the STRICT semver parser
+// after stripping a single optional leading "v". Non-strict forms — partial
+// versions ("v2", "2.1") and leading-zero segments ("01.2.3", "2020.01.15") —
+// are ignored, while strict releases (with or without a "v" prefix) and valid
+// CalVer without leading zeros are honored.
+func TestStrictTagParsing(t *testing.T) {
+	t.Parallel()
+
+	// Forms the strict parser rejects (after stripping "v") must be ignored: a
+	// direct commit above the untagged 0.1.0 root reads 0.1.2 regardless.
+	for _, bad := range []string{"v2", "2", "2.1", "v2.1", "01.2.3", "2020.01.15", "1.2"} {
+		bad := bad
+		t.Run("Ignored/"+bad, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.commit("root") // 0.1.0 root
+			c1 := h.commit("m1")
+			h.tag(bad, c1) // non-strict: must be ignored
+			h.commit("m2")
+			h.want("0.1.2") // unaffected by the non-strict tag
+		})
+	}
+
+	// A bare release with a "v" prefix is accepted (the prefix is stripped).
+	t.Run("VPrefixAccepted", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("v1.9.9", c1)
+		h.commit("m2")
+		h.want("1.9.10") // built on 1.9.9
+	})
+
+	// A CalVer tag with no leading zeros is valid strict semver and is honored.
+	t.Run("CalVerWithoutLeadingZerosAccepted", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("2020.12.15", c1)
+		h.commit("m2")
+		h.want("2020.12.16")
+	})
+
+	// A "v"-prefixed prerelease reference tag is accepted as a reference point.
+	t.Run("VPrefixPrereleaseReference", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/x")
+		h.commit("b1")
+		h.tag("v4.5.6-foobar-x.3", mustHead(t, h)) // v-prefixed reference tag
+		h.want("4.5.6-foobar-x.3")
+	})
+
+	// A "v"-prefixed non-strict form (partial "v2.1") used as a would-be
+	// reference is also ignored.
+	t.Run("VPrefixPartialIgnored", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // 0.1.0 root
+		c1 := h.commit("m1")
+		h.tag("v2.1", c1) // partial after stripping "v": ignored
+		h.commit("m2")
+		h.want("0.1.2")
+	})
+}
+
+// TestPrereleaseTagsIgnored verifies that a prerelease semver tag WITHOUT a
+// trailing numeric counter (e.g. "1.2.3-rc") never establishes a release
+// boundary and is otherwise ignored: a prerelease is by definition "not yet
+// released", and without a counter it is not a reference point either. Build
+// metadata (e.g. "1.2.3+build") is NOT a prerelease and still counts as the
+// release it denotes. (Prerelease tags that DO carry a counter are reference
+// tags; see TestPrereleaseReferenceTags.)
+func TestPrereleaseTagsIgnored(t *testing.T) {
+	t.Parallel()
+
+	// A counter-less prerelease tag must not act as a release: two direct commits
+	// above the untagged 0.1.0 root read 0.1.2, unaffected by a "5.0.0-beta" tag.
+	t.Run("PrereleaseOnlyIsNotABoundary", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // 0.1.0 root
+		c1 := h.commit("m1")
+		h.tag("5.0.0-beta", c1) // prerelease, no counter: must be ignored
+		h.commit("m2")
+		h.want("0.1.2") // NOT 5.0.1
+	})
+
+	// A counter-less prerelease tag alongside the real release on the same commit
+	// must not change anything: the real release governs.
+	t.Run("PrereleaseAlongsideRelease", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.2.3-rc", c1) // prerelease, no counter: ignored
+		h.tag("1.2.3", c1)    // the real release
+		h.commit("m2")
+		h.want("1.2.4") // built on 1.2.3, one direct commit above
+	})
+
+	// A counter-less prerelease tag on a non-main branch does not affect the
+	// branch it sits on, nor develop once the branch is merged in.
+	t.Run("PrereleaseOnBranchDoesNotLeak", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main") // back-merge so develop builds on 2.1.0
+
+		// Bugfix branch with a rogue counter-less prerelease tag on its commit.
+		h.newBranch("bugfix/rogue")
+		h.commit("b1")
+		h.tag("9.9.9-foo", mustHead(t, h)) // counter-less: ignored
+		// The branch builds on the real release 2.1.0, not the rogue 9.9.9.
+		h.want("2.1.1-rogue.1")
+
+		// Merge the branch into develop: the prerelease tag still must not leak.
+		h.checkout("develop")
+		h.merge("bugfix/rogue")
+		h.deleteBranch("bugfix/rogue")
+		h.want("2.1.1-alpha.4") // still building on 2.1.0, not 9.10.0
+	})
+
+	// Build metadata is not a prerelease: "1.2.3+build" still denotes the 1.2.3
+	// release and remains a valid boundary.
+	t.Run("BuildMetadataStillCounts", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.2.3+build.7", c1) // metadata, not prerelease: a real release
+		h.commit("m2")
+		h.want("1.2.4")
+	})
+
+	// The ignored counter-less prerelease tag is traced, so the drop is
+	// observable.
+	t.Run("PrereleaseIsTraced", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("3.0.0-alpha", c1) // no counter -> ignored
+		h.commit("m2")
+
+		_, stderr, err := runCaptureAll(t, h, "--debug")
+		if err != nil {
+			t.Fatalf("--debug: %v", err)
+		}
+		if !strings.Contains(stderr, `ignoring tag "3.0.0-alpha"`) {
+			t.Errorf("expected trace to report the ignored prerelease tag; got:\n%s", stderr)
+		}
+	})
+}
+
+// TestPrereleaseReferenceTags verifies that a prerelease tag carrying a trailing
+// numeric counter (e.g. "4.5.6-foobar-x.3") acts as a reference point rather
+// than being ignored: on the tagged commit the version equals the tag verbatim,
+// subsequent commits continue the counter using the tag's label, and once the
+// reference core is higher than the branch's normally-computed core it takes
+// over and propagates through develop (as -alpha.N) and into a main release.
+func TestPrereleaseReferenceTags(t *testing.T) {
+	t.Parallel()
+
+	// On the tagged commit the version is the tag verbatim; the next commit
+	// continues the counter with the tag's label.
+	t.Run("VerbatimThenContinues", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/whatever")
+		h.commit("b1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
+		h.want("4.5.6-foobar-x.3") // exactly the tag
+		h.commit("b2")
+		h.want("4.5.6-foobar-x.4") // counter continues from 3, label from tag
+	})
+
+	// After the reference tag, several commits keep incrementing the counter.
+	t.Run("CounterKeepsCounting", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
+		h.commit("f2")
+		h.commit("f3")
+		h.want("4.5.6-foobar-x.5") // 3 + two commits after the tag
+	})
+
+	// Merging the reference-tagged branch into develop yields the tag's core with
+	// the alpha label and the normal develop section counter.
+	t.Run("PropagatesToDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/ref")
+		h.commit("b1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
+		h.checkout("develop")
+		h.merge("bugfix/ref")
+		h.deleteBranch("bugfix/ref")
+
+		h.want("4.5.6-alpha.4") // tag core, alpha label, normal develop count
+	})
+
+	// Releasing that develop into main produces the tag's core as a plain
+	// release.
+	t.Run("PropagatesToMainRelease", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/ref")
+		h.commit("b1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
+		h.checkout("develop")
+		h.merge("bugfix/ref")
+		h.deleteBranch("bugfix/ref")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("4.5.6") // the reference core becomes the release
+	})
+
+	// When the branch's normally-computed core is HIGHER than the reference tag,
+	// the tag is ignored entirely (core, label, and counter all come from the
+	// normal computation).
+	t.Run("IgnoredWhenLowerThanComputed", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("5.0.0", mg) // released 5.0.0
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/low")
+		h.commit("b1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h)) // lower than 5.0.x -> ignored
+		// Normal computation: builds on 5.0.0, patch bump, branch label.
+		h.want("5.0.1-low.1")
+	})
+
+	// Direct merge of a reference-tagged branch straight into main (no develop
+	// branch, the hotfix-style flow): the reference core becomes the release.
+	t.Run("DirectMergeIntoMainRelease", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("2.1.0", mustHead(t, h))
+
+		h.newBranch("bugfix/ref")
+		h.commit("b1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
+		h.want("4.5.6-foobar-x.3") // on the branch, the tag verbatim
+
+		h.checkout("main")
+		h.merge("bugfix/ref")
+		h.want("4.5.6") // reference core wins over the 2.1.1 the merge would give
+	})
+
+	// Same direct-into-main flow with a feature branch: the reference core still
+	// governs the release even though a feature merge would bump minor.
+	t.Run("DirectFeatureMergeIntoMainRelease", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("2.1.0", mustHead(t, h))
+
+		h.newBranch("feature/ref")
+		h.commit("f1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h))
+
+		h.checkout("main")
+		h.merge("feature/ref")
+		h.want("4.5.6")
+	})
+
+	// Direct merge into main where the reference core is LOWER than main's
+	// current release: the tag is ignored and the normal patch bump applies.
+	t.Run("DirectMergeIntoMainIgnoredWhenLower", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("5.0.0", mustHead(t, h)) // main already at 5.0.0
+
+		h.newBranch("bugfix/low")
+		h.commit("b1")
+		h.tag("4.5.6-foobar-x.3", mustHead(t, h)) // lower -> ignored
+
+		h.checkout("main")
+		h.merge("bugfix/low")
+		h.want("5.0.1") // normal patch bump, reference ignored
+	})
+}
+
+// TestConflictingTags verifies the rules for commits carrying tags that resolve
+// to more than one version:
+//  1. A conflict only errors when the ambiguous commit is actually relevant to
+//     the computed version; a conflict on an older commit that a later clean tag
+//     supersedes is ignored.
+//  2. When relevant, a conflict errors regardless of whether the tags are
+//     releases or prereleases, and regardless of the branch.
+//  3. Two tags resolving to the SAME version (e.g. "1.2.3" and "v1.2.3", or a
+//     release and its build-metadata variant) are not a conflict.
+func TestConflictingTags(t *testing.T) {
+	t.Parallel()
+
+	// (1) A conflict below a later clean release tag is irrelevant and ignored.
+	t.Run("IrrelevantEarlierConflictIgnored", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.0.0", c1) // conflicting pair on m1...
+		h.tag("4.0.0", c1) // ...but m1 is superseded below the latest tag
+		c2 := h.commit("m2")
+		h.tag("5.0.0", c2) // latest clean release governs
+		h.commit("m3")
+		h.want("5.0.1") // built on 5.0.0; the m1 conflict never consulted
+	})
+
+	// (2a) Two different RELEASE tags on the relevant commit error.
+	t.Run("ReleaseConflictErrors", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.0.0", c1)
+		h.tag("4.0.0", c1)
+		_, _, err := runCaptureAll(t, h)
+		if err == nil || !strings.Contains(err.Error(), "conflicting version tags") {
+			t.Fatalf("expected conflicting version tags error, got: %v", err)
+		}
+	})
+
+	// (2b) A release tag vs a prerelease reference tag (different versions) on
+	// the relevant commit errors.
+	t.Run("ReleaseVsPrereleaseConflictErrors", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.0.0", c1)
+		h.tag("4.5.6-foo.2", c1)
+		_, _, err := runCaptureAll(t, h)
+		if err == nil || !strings.Contains(err.Error(), "conflicting version tags") {
+			t.Fatalf("expected conflicting version tags error, got: %v", err)
+		}
+	})
+
+	// (2c) A conflict on a non-main branch's own HEAD commit errors.
+	t.Run("ConflictOnBranchErrors", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/x")
+		h.commit("b1")
+		head := mustHead(t, h)
+		h.tag("4.5.6-foo.2", head)
+		h.tag("7.8.9-bar.3", head)
+		_, _, err := runCaptureAll(t, h)
+		if err == nil || !strings.Contains(err.Error(), "conflicting version tags") {
+			t.Fatalf("expected conflicting version tags error, got: %v", err)
+		}
+	})
+
+	// (2d) A conflict between two release tags on develop's released tip errors.
+	t.Run("ConflictOnDevelopErrors", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.tag("9.9.9", mg) // conflicting release on the released tip
+		h.checkout("develop")
+
+		_, _, err := runCaptureAll(t, h)
+		if err == nil || !strings.Contains(err.Error(), "conflicting version tags") {
+			t.Fatalf("expected conflicting version tags error on develop, got: %v", err)
+		}
+	})
+
+	// (3a) "1.2.3" and "v1.2.3" resolve to the same version: no conflict.
+	t.Run("VPrefixDuplicateNotAConflict", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.2.3", c1)
+		h.tag("v1.2.3", c1)
+		h.commit("m2")
+		h.want("1.2.4")
+	})
+
+	// (3b) A release and its build-metadata variant are the same release.
+	t.Run("BuildMetadataDuplicateNotAConflict", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		c1 := h.commit("m1")
+		h.tag("1.2.3", c1)
+		h.tag("1.2.3+build.9", c1)
+		h.commit("m2")
+		h.want("1.2.4")
+	})
+
+	// (3c) A prerelease reference tag and its "v"-prefixed duplicate are the same
+	// reference: no conflict.
+	t.Run("VPrefixPrereleaseDuplicateNotAConflict", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.1.0", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/x")
+		h.commit("b1")
+		head := mustHead(t, h)
+		h.tag("4.5.6-foo.2", head)
+		h.tag("v4.5.6-foo.2", head)
+		h.want("4.5.6-foo.2")
+	})
+}
+
 // TestDirectMergeIntoMain verifies how a merge of a non-develop branch directly
 // into main advances the release core: a feature branch bumps minor, any other
 // branch bumps patch, each exactly once — unless a commit brought in by the

@@ -160,38 +160,89 @@ func (g *repo) mainBranch() (*object.Commit, string, error) {
 	return nil, "", fmt.Errorf("no \"main\" or \"master\" branch found")
 }
 
-// tagCores maps a commit hash to the semver core of any tag pointing at it.
-// Both lightweight and annotated tags are considered; tags that are not valid
-// semver are ignored. If several semver tags point at the same commit, the
-// highest one wins.
-func (g *repo) tagCores() (map[plumbing.Hash]core, error) {
+// tagCores maps a commit hash to the semver core of any release tag pointing at
+// it, and (separately) a commit hash to any prerelease "reference" tag on it.
+//
+// A release tag is a bare release version (e.g. "v2.1.0"), which becomes a
+// calculation boundary. A prerelease reference tag carries a trailing numeric
+// counter (e.g. "4.5.6-foobar-x.3") and is returned in refs — it is not a
+// boundary but pins an in-progress core/label/counter. Any other tag (non-semver
+// after stripping "v", or a prerelease without a counter) is ignored entirely.
+//
+// When several USABLE tags point at the same commit and they resolve to the SAME
+// version, that is fine (e.g. "1.2.3" and "v1.2.3", or a release and a matching
+// duplicate). When they resolve to DIFFERENT versions the commit is ambiguous:
+// its hash is recorded in conflicts with a descriptive error. That error is NOT
+// raised here — a conflict only matters if the commit is actually consulted
+// during calculation, so callers check conflicts lazily when they select a tag.
+//
+// skipped, when non-nil, is called once for every tag that is ignored (with the
+// tag name and the reason), so callers can trace which tags were dropped.
+func (g *repo) tagCores(skipped func(name string, err error)) (
+	map[plumbing.Hash]core, map[plumbing.Hash]prereleaseRef, map[plumbing.Hash]error, error,
+) {
 	out := map[plumbing.Hash]core{}
+	refs := map[plumbing.Hash]prereleaseRef{}
+	conflicts := map[plumbing.Hash]error{}
+
+	// Per commit, the version-id and name of the first usable tag seen, so a
+	// second usable tag with a different version-id can be reported as a conflict.
+	firstID := map[plumbing.Hash]string{}
+	firstName := map[plumbing.Hash]string{}
+
 	iter, err := g.r.Tags()
 	if err != nil {
-		return nil, fmt.Errorf("list tags: %w", err)
+		return nil, nil, nil, fmt.Errorf("list tags: %w", err)
 	}
 	defer iter.Close()
 	err = iter.ForEach(func(ref *plumbing.Reference) error {
 		name := ref.Name().Short()
-		c, perr := parseCore(name)
-		if perr != nil {
-			return nil // not a semver tag; ignore
-		}
 		// Resolve the commit the tag points at (annotated tags dereference to
 		// their target).
 		target := ref.Hash()
 		if to, terr := g.r.TagObject(ref.Hash()); terr == nil {
 			target = to.Target
 		}
-		if existing, ok := out[target]; !ok || less(existing, c) {
-			out[target] = c
+
+		// Determine this tag's usable version, if any, as a comparable id.
+		var id string
+		if c, perr := parseCore(name); perr == nil {
+			id = "release:" + c.String()
+			// Highest release wins on same-commit duplicates (only reached for
+			// equal ids after the conflict check below, so it stays the same).
+			if existing, ok := out[target]; !ok || less(existing, c) {
+				out[target] = c
+			}
+		} else if pr, perr := parsePrereleaseRef(name); perr == nil {
+			id = fmt.Sprintf("ref:%s-%s.%d", pr.core, pr.label, pr.counter)
+			if _, ok := refs[target]; !ok {
+				refs[target] = pr
+			}
+		} else {
+			// Neither a release nor a prerelease reference: ignore entirely.
+			if skipped != nil {
+				skipped(name, fmt.Errorf("not a release or prerelease reference tag"))
+			}
+			return nil
+		}
+
+		// Conflict bookkeeping: two usable tags with different version-ids on the
+		// same commit make it ambiguous.
+		if prevID, ok := firstID[target]; ok {
+			if prevID != id && conflicts[target] == nil {
+				conflicts[target] = fmt.Errorf(
+					"conflicting version tags on %s: %q and %q", target, firstName[target], name)
+			}
+		} else {
+			firstID[target] = id
+			firstName[target] = name
 		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
-	return out, nil
+	return out, refs, conflicts, nil
 }
 
 func less(a, b core) bool {

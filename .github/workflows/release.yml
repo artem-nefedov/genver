@@ -55,7 +55,7 @@ jobs:
           PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
         run: |
           set -eu
-          VERSION=$(go run . --branch "${{ github.ref_name }}" --tag-main --push-tag-to "$PUSH_URL")
+          VERSION=$(go run . --branch '${{ github.ref_name }}' --tag-main --tag-format 'v{{.Full}}' --push-tag-to "$PUSH_URL")
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Computed release version: ${VERSION}"
 

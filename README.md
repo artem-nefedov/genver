@@ -14,8 +14,14 @@ brew install artem-nefedov/tap/givi
 
 ### Download binary
 
-Pre-built binaries for Linux and macOS (amd64/arm64) are available on the
+Prebuilt binaries for Linux/macOS/Windows (amd64/arm64) are available on the
 [Releases](https://github.com/artem-nefedov/givi/releases) page.
+
+### Go install
+
+```sh
+go install github.com/artem-nefedov/givi@latest
+```
 
 ### Docker images
 
@@ -37,7 +43,7 @@ Change "latest" to specific release to pin the version.
 
 ## Supported flow
 
-Git repo needs to be generated is structured like this:
+Git repo needs to be structured like this:
 
 - There is a permanent main branch called "main" or "master"
 - Optionally, there is a permanent "develop" branch created from main branch, from which merge commits are made to main, which creates a new release

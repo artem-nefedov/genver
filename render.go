@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"text/template"
+
+	sprig "github.com/Masterminds/sprig/v3"
 )
 
 // formatVars is the data passed to a --format / --tag-format Go template. Every
@@ -21,8 +23,7 @@ import (
 //	Minor       the core's minor component as an integer, e.g. 2
 //	Patch       the core's patch component as an integer, e.g. 3
 //	Branch      the exact name of the branch, e.g. "feature/cool-abc"
-//	ShortSHA    the abbreviated HEAD commit hash, e.g. "0e6df221"
-//	LongSHA     the full HEAD commit hash, e.g. "0e6df221..." (40 hex chars)
+//	SHA         the full HEAD commit hash (40 hex chars)
 type formatVars struct {
 	Full       string
 	Core       string
@@ -32,22 +33,18 @@ type formatVars struct {
 	Minor      uint64
 	Patch      uint64
 	Branch     string
-	ShortSHA   string
-	LongSHA    string
+	SHA        string
 }
 
 // renderFormat expands a --format template into the final output string. The
 // template is a Go text/template referencing the fields of formatVars, e.g.
 // "{{.Core}}{{.PreRelease}}" or "v{{.Full}}". Integer components (Major, Minor,
 // Patch) are passed as integers so template arithmetic and formatting work on
-// them; the rest are strings. Two string helpers are available in templates:
-// trimPrefix and trimSuffix, e.g. {{trimPrefix "-" .PreRelease}} yields the
-// prerelease tail without its leading dash. Their argument order matches
-// Helm/Sprig (prefix/suffix first, then the string).
+// them; the rest are strings. The Sprig function library is available.
 //
 // Referencing an unknown field is a parse-time error, so a typo like
 // "{{.Prerlease}}" fails instead of silently rendering nothing.
-func (r result) renderFormat(tmpl string) (string, error) {
+func (r result) renderFormat(tmpl string, allowNonHermetic bool) (string, error) {
 	full, err := r.version()
 	if err != nil {
 		return "", err
@@ -71,20 +68,16 @@ func (r result) renderFormat(tmpl string) (string, error) {
 		Minor:      r.core.minor,
 		Patch:      r.core.patch,
 		Branch:     r.branch,
-		ShortSHA:   short(r.headHash),
-		LongSHA:    r.headHash.String(),
+		SHA:        r.headHash.String(),
 	}
 
-	// Option("missingkey=error") turns a reference to an absent field into an
-	// error rather than an empty/"<no value>" render. A small set of string
-	// helpers is registered so templates can, e.g., strip PreRelease's leading
-	// dash with {{trimPrefix "-" .PreRelease}}. The argument order matches
-	// Helm/Sprig (prefix/suffix first, then the string), which is the reverse of
-	// the strings package.
-	funcs := template.FuncMap{
-		"trimPrefix": func(prefix, s string) string { return strings.TrimPrefix(s, prefix) },
-		"trimSuffix": func(suffix, s string) string { return strings.TrimSuffix(s, suffix) },
+	var funcs template.FuncMap
+	if allowNonHermetic {
+		funcs = sprig.TxtFuncMap()
+	} else {
+		funcs = sprig.HermeticTxtFuncMap()
 	}
+
 	t, err := template.New("format").Funcs(funcs).Option("missingkey=error").Parse(tmpl)
 	if err != nil {
 		return "", fmt.Errorf("parse --format %q: %w", tmpl, err)

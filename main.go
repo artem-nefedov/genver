@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 )
 
 // version is givi's own version, overridable at build time with
@@ -24,9 +25,14 @@ Flags:
   --format <tmpl>     Render the version through a template instead of printing
                       the full version. <tmpl> is a Go template with exposed
                       fields: .Full, .Core, .Major, .Minor, .Patch, .PreRelease,
-                      .Count, .ShortSHA, .LongSHA, .Branch. Doesn't affect tag.
+                      .Count, .SHA, .Branch. Allows usage of Sprig functions
+                      (only hermetic by default). Doesn't affect tag.
   --tag-format <tmpl> Same as --format, but also affects tag by --tag-main.
-  --write-to <file>   Also write the output (honoring --format) to <file>.
+  --write-to <tmpl>   Also write the output (honoring --format) to one or more
+                      files. The argument is a Go template like --format. Every
+                      non-blank line produced is a file path (whitespace trimmed).
+  --allow-nonhermetic Expose all Sprig template functions in --format/etc.,
+                      including non-repeatable ones such as env, now and uuidv4.
   --branch <name>     Branch name. On a detached HEAD it supplies the branch;
                       on a checked-out branch it validates the actual branch name.
   --tag-main          On the main branch, create a lightweight tag with the
@@ -61,7 +67,8 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		showVersion   = fs.Bool("version", false, "show givi version")
 		formatTmpl    = fs.String("format", "", "render the version through a Go template")
 		tagFormatTmpl = fs.String("tag-format", "", "like --format, but also shapes the tag from --tag-main")
-		writeTo       = fs.String("write-to", "", "also write the output to this file (overwriting it)")
+		writeTo       = fs.String("write-to", "", "also write the output to the file(s) named by this template, one per non-blank line")
+		allowNonHerm  = fs.Bool("allow-nonhermetic", false, "expose all Sprig template functions, including non-repeatable ones (env, now, uuidv4, ...)")
 		branchName    = fs.String("branch", "", "branch name to compute for; overrides a detached HEAD, must match a checked-out branch")
 		tagMain       = fs.Bool("tag-main", false, "tag HEAD on main with the computed version")
 		pushTagTo     = fs.String("push-tag-to", "", "push only the computed tag to the given remote name or URL")
@@ -131,7 +138,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	// version.
 	tagVal := v
 	if *tagFormatTmpl != "" {
-		tagVal, err = res.renderFormat(*tagFormatTmpl)
+		tagVal, err = res.renderFormat(*tagFormatTmpl, *allowNonHerm)
 		if err != nil {
 			return err
 		}
@@ -177,23 +184,39 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	if stdoutTmpl == "" {
 		stdoutTmpl = *tagFormatTmpl
 	}
-	out2 := v
+	outText := v
 	if stdoutTmpl != "" {
-		out2, err = res.renderFormat(stdoutTmpl)
+		outText, err = res.renderFormat(stdoutTmpl, *allowNonHerm)
 		if err != nil {
 			return err
 		}
 	}
 
-	// --write-to persists the same output (honoring --format) to a file,
-	// overwriting it if present. The version is still printed to stdout below.
+	// --write-to persists the same output (honoring --format) to one or more
+	// files, overwriting each if present. Its argument is rendered through the
+	// same template as --format; every non-blank line of the result names a
+	// file (leading/trailing whitespace trimmed) that the output is written to.
+	// The version is still printed to stdout below.
 	if *writeTo != "" {
-		if err := g.writeOutput(*writeTo, []byte(out2+"\n"), 0o644); err != nil {
+		rendered, err := res.renderFormat(*writeTo, *allowNonHerm)
+		if err != nil {
 			return fmt.Errorf("write-to %q: %w", *writeTo, err)
 		}
-		calc.logf("write-to: wrote output to %q", *writeTo)
+		for line := range strings.SplitSeq(rendered, "\n") {
+			name := strings.TrimSpace(line)
+			if name == "" {
+				continue
+			}
+			if strings.HasSuffix(name, "/") {
+				return fmt.Errorf(`write-to %q: path ends in "/", expected a file`, name)
+			}
+			if err := g.writeOutput(name, []byte(outText+"\n"), 0o644); err != nil {
+				return fmt.Errorf("write-to %q: %w", name, err)
+			}
+			calc.logf("write-to: wrote output to %q", name)
+		}
 	}
 
-	fmt.Fprintln(out, out2)
+	fmt.Fprintln(out, outText)
 	return nil
 }

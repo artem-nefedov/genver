@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -25,6 +26,14 @@ type fileWriter interface {
 type osFileWriter struct{}
 
 func (osFileWriter) WriteFile(name string, data []byte, perm os.FileMode) error {
+	// --write-to paths may be templated and include directories (e.g.
+	// "versions/1.2.3.txt"), so create any missing parents first. This mirrors
+	// the billy-backed writer used in tests.
+	if dir := filepath.Dir(name); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return err
+		}
+	}
 	return os.WriteFile(name, data, perm)
 }
 

@@ -163,3 +163,117 @@ func TestTagFormatIgnoredOnNonMain(t *testing.T) {
 		t.Errorf("unexpected tag %s created on non-main branch", ref.Name())
 	}
 }
+
+// writeToFileCount returns how many regular files --write-to persisted directly
+// in dir (subdirectories are counted as one entry, not recursed).
+func writeToFileCount(t *testing.T, h *harness, dir string) int {
+	t.Helper()
+	entries, err := h.wfs.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %q: %v", dir, err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			n++
+		}
+	}
+	return n
+}
+
+// TestWriteToTemplate: --write-to is itself rendered through the --format
+// template, so the target path can embed version variables.
+func TestWriteToTemplate(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root") // main = 0.1.0
+
+	out, err := runCapture(t, h, "--write-to", "versions/{{.Core}}.txt")
+	if err != nil || out != "0.1.0" {
+		t.Fatalf("--write-to template: out=%q err=%v", out, err)
+	}
+	if got := strings.TrimSpace(h.readWriteTo("versions/0.1.0.txt")); got != "0.1.0" {
+		t.Errorf("write-to content = %q, want %q", got, "0.1.0")
+	}
+}
+
+// TestWriteToMultipleFiles: every non-blank line of the rendered --write-to
+// argument is a separate file, with leading/trailing whitespace trimmed and
+// blank lines ignored. Interior whitespace in a path is preserved.
+func TestWriteToMultipleFiles(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root") // main = 0.1.0
+
+	// A multi-line argument: blank and whitespace-only lines are skipped;
+	// surrounding whitespace is trimmed; the interior space in "dir/a b.txt"
+	// is kept.
+	tmpl := "  first.txt  \n\n   \n\tsecond.txt\ndir/a b.txt\n"
+	out, err := runCapture(t, h, "--format", "v{{.Full}}", "--write-to", tmpl)
+	if err != nil || out != "v0.1.0" {
+		t.Fatalf("--write-to multi: out=%q err=%v", out, err)
+	}
+
+	for _, name := range []string{"first.txt", "second.txt", "dir/a b.txt"} {
+		if got := strings.TrimSpace(h.readWriteTo(name)); got != "v0.1.0" {
+			t.Errorf("write-to %q content = %q, want %q", name, got, "v0.1.0")
+		}
+	}
+	// Exactly three files were written: the whitespace-only lines were skipped.
+	if got := writeToFileCount(t, h, "/"); got != 2 { // first.txt, second.txt in root
+		t.Errorf("root file count = %d, want 2 (dir/ holds the third)", got)
+	}
+}
+
+// TestWriteToBlankRendersNoFiles: a template that renders to only whitespace
+// writes nothing, and is not an error.
+func TestWriteToBlankRendersNoFiles(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root")
+
+	out, err := runCapture(t, h, "--write-to", "   \n\t\n")
+	if err != nil || out != "0.1.0" {
+		t.Fatalf("--write-to blank: out=%q err=%v", out, err)
+	}
+	if got := writeToFileCount(t, h, "/"); got != 0 {
+		t.Errorf("expected no files written, got %d", got)
+	}
+}
+
+// TestWriteToDirectoryPathFails: a line ending in "/" names a directory, which
+// is not a valid write target, so the run fails early and writes nothing.
+func TestWriteToDirectoryPathFails(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root")
+
+	if _, err := runCapture(t, h, "--write-to", "versions/"); err == nil {
+		t.Error("--write-to path ending in / should error")
+	}
+	// A trailing slash after trimming surrounding whitespace must also fail.
+	if _, err := runCapture(t, h, "--write-to", "  out/  "); err == nil {
+		t.Error("--write-to trimmed path ending in / should error")
+	}
+	// Nothing should have been written.
+	if got := writeToFileCount(t, h, "/"); got != 0 {
+		t.Errorf("expected no files written, got %d", got)
+	}
+}
+
+// TestWriteToDirectoryPathFailsEarly: when a directory line follows a valid
+// file line, the run still fails; the earlier file may already be written, but
+// the directory line never becomes a target.
+func TestWriteToDirectoryPathFailsEarly(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root")
+
+	if _, err := runCapture(t, h, "--write-to", "ok.txt\nbad/"); err == nil {
+		t.Error("--write-to with a directory line should error")
+	}
+	// The "bad/" directory line must not have produced a directory entry.
+	if writeToFileCount(t, h, "/") > 1 {
+		t.Errorf("unexpected extra entries written for the directory line")
+	}
+}

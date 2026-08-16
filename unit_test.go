@@ -526,7 +526,6 @@ func TestStrictTagParsing(t *testing.T) {
 	// Forms the strict parser rejects (after stripping "v") must be ignored: a
 	// direct commit above the untagged 0.1.0 root reads 0.1.2 regardless.
 	for _, bad := range []string{"v2", "2", "2.1", "v2.1", "01.2.3", "2020.01.15", "1.2"} {
-		bad := bad
 		t.Run("Ignored/"+bad, func(t *testing.T) {
 			t.Parallel()
 			h := newHarness(t)
@@ -1714,9 +1713,9 @@ func TestFormat(t *testing.T) {
 		}
 	})
 
-	// shortsha and longsha expose the HEAD commit hash: longsha is the full
-	// 40-char hex, shortsha its 8-char abbreviation. Both must equal the actual
-	// HEAD hash of the repo the version was computed for.
+	// SHA exposes the full 40-char HEAD commit hash. The short hash is obtained
+	// in-template with Sprig's substr, e.g. {{substr 0 8 .SHA}}. Both must equal
+	// the actual HEAD hash of the repo the version was computed for.
 	t.Run("ShaVariables", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -1725,15 +1724,17 @@ func TestFormat(t *testing.T) {
 		head := h.commit("d1")
 		want := head.String()
 
-		if out, err := runCapture(t, h, "--format", "{{.LongSHA}}"); err != nil || out != want {
-			t.Errorf("longsha: out=%q err=%v, want %q", out, err, want)
+		if out, err := runCapture(t, h, "--format", "{{.SHA}}"); err != nil || out != want {
+			t.Errorf("sha: out=%q err=%v, want %q", out, err, want)
 		}
-		if out, err := runCapture(t, h, "--format", "{{.ShortSHA}}"); err != nil || out != want[:8] {
-			t.Errorf("shortsha: out=%q err=%v, want %q", out, err, want[:8])
+		// Sprig's substr abbreviates the SHA: {{substr 0 8 .SHA}} is the 8-char
+		// short hash.
+		if out, err := runCapture(t, h, "--format", "{{substr 0 8 .SHA}}"); err != nil || out != want[:8] {
+			t.Errorf("short sha via substr: out=%q err=%v, want %q", out, err, want[:8])
 		}
 		// A realistic image tag combining version and short sha.
-		if out, err := runCapture(t, h, "--format", "{{.Core}}-{{.ShortSHA}}"); err != nil || out != "0.1.1-"+want[:8] {
-			t.Errorf("core+shortsha: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
+		if out, err := runCapture(t, h, "--format", "{{.Core}}-{{substr 0 8 .SHA}}"); err != nil || out != "0.1.1-"+want[:8] {
+			t.Errorf("core+short sha: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
 		}
 	})
 
@@ -1822,6 +1823,44 @@ func TestFormat(t *testing.T) {
 		}
 		if out, err := runCapture(t, h, "--format", `{{if lt .Major 5}}small{{end}}`); err != nil || out != "small" {
 			t.Errorf("lt on int Major: out=%q err=%v", out, err)
+		}
+	})
+
+	// By default only Sprig's hermetic functions are available: a hermetic
+	// function like substr works, but a non-hermetic one like now is unknown and
+	// errors. With --allow-nonhermetic the full Sprig set is exposed, so now
+	// resolves.
+	t.Run("HermeticFunctions", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1") // develop = 0.1.1-alpha.1
+
+		// A hermetic function (substr) works with no extra flag.
+		if out, err := runCapture(t, h, "--format", `{{substr 0 3 .Core}}`); err != nil || out != "0.1" {
+			t.Errorf("hermetic substr: out=%q err=%v, want %q", out, err, "0.1")
+		}
+
+		// Non-hermetic functions (now, env, uuidv4) are not registered by
+		// default, so the template fails to parse.
+		for _, tmpl := range []string{`{{now}}`, `{{env "PATH"}}`, `{{uuidv4}}`} {
+			if out, err := runCapture(t, h, "--format", tmpl); err == nil {
+				t.Errorf("non-hermetic %q should error without --allow-nonhermetic, got out=%q", tmpl, out)
+			}
+		}
+
+		// With --allow-nonhermetic the same non-hermetic functions resolve
+		// (they parse and execute without error); we only assert they no longer
+		// error, since their output is not deterministic.
+		for _, tmpl := range []string{`{{now | date "2006"}}`, `{{uuidv4 | len}}`} {
+			if _, err := runCapture(t, h, "--allow-nonhermetic", "--format", tmpl); err != nil {
+				t.Errorf("non-hermetic %q with --allow-nonhermetic should succeed: err=%v", tmpl, err)
+			}
+		}
+		// substr still works in non-hermetic mode too.
+		if out, err := runCapture(t, h, "--allow-nonhermetic", "--format", `{{substr 0 3 .Core}}`); err != nil || out != "0.1" {
+			t.Errorf("hermetic substr in non-hermetic mode: out=%q err=%v, want %q", out, err, "0.1")
 		}
 	})
 

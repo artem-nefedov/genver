@@ -3,7 +3,7 @@ BINARY := givi
 VERSION ?= $(shell go run . 2>/dev/null)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build install test clean release-preview
+.PHONY: build install fix test clean release-preview
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BINARY) .
@@ -11,8 +11,10 @@ build:
 install:
 	CGO_ENABLED=0 go install -trimpath -ldflags '$(LDFLAGS)' .
 
-vet:
-	go vet ./...
+fix:
+	go fix ./...
+	go vet -fix ./...
+	go mod tidy
 
 test:
 	go test -v -count=1 ./...

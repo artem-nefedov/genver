@@ -33,6 +33,12 @@ func TestBumpFromMessage(t *testing.T) {
 		"big change +semver: major now": bumpMajor,
 		"+semver:patch":                 bumpPatch,
 		"+semver: MINOR":                bumpMinor,
+		// Multiple directives in one message: the strongest wins, regardless of
+		// the order they appear in.
+		"+semver:minor +semver:major": bumpMajor,
+		"+semver:major +semver:minor": bumpMajor,
+		"+semver:patch +semver:minor": bumpMinor,
+		"+semver:minor +semver:patch": bumpMinor,
 	}
 	for msg, want := range cases {
 		if got := bumpFromMessage(msg); got != want {
@@ -829,8 +835,11 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 		h.want("4.5.6") // reference core wins over the 2.1.1 the merge would give
 	})
 
-	// Same direct-into-main flow with a feature branch: the reference core still
-	// governs the release even though a feature merge would bump minor.
+	// Same direct-into-main flow with a feature branch. The reference tag on the
+	// branch tip anchors the core to 4.5.6, but the feature merge — which carries
+	// the same weight as "+semver: minor" and sits ABOVE the tagged tip — lifts
+	// the anchor by a minor. To keep the tag's core exactly, the tag would have
+	// to sit on the merge commit itself (see ReferenceTagDownwardAnchor).
 	t.Run("DirectFeatureMergeIntoMainRelease", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -844,7 +853,7 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 
 		h.checkout("main")
 		h.merge("feature/ref")
-		h.want("4.5.6")
+		h.want("4.6.0") // anchor 4.5.6 lifted a minor by the feature merge
 	})
 
 	// Direct merge into main where the reference core is LOWER than main's
@@ -863,6 +872,333 @@ func TestPrereleaseReferenceTags(t *testing.T) {
 		h.checkout("main")
 		h.merge("bugfix/low")
 		h.want("5.0.1") // normal patch bump, reference ignored
+	})
+}
+
+// TestReferenceTagDownwardAnchor verifies that a prerelease reference tag can
+// pull a computed core DOWN (revert an automatic bump), not just raise it, as
+// long as the anchored core stays at or above the release boundary the section
+// builds on. Commits after the tag only advance the counter unless they carry an
+// explicit "+semver:" directive (or are a feature merge), which lifts the anchor.
+func TestReferenceTagDownwardAnchor(t *testing.T) {
+	t.Parallel()
+
+	// The headline scenario: last main release 1.2.2, a feature merged into
+	// develop would bump minor to 1.3.0, but a reference tag 1.2.3-alpha.N on
+	// that merge reverts it to a patch-range 1.2.3. New develop commits keep the
+	// 1.2.3 core and only advance the counter; releasing to main yields 1.2.3.
+	t.Run("RevertFeatureMinorToPatchOnDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("1.2.2", mg) // main released at 1.2.2
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("feature/big")
+		h.commit("f1")
+		h.checkout("develop")
+		fm := h.merge("feature/big") // would bump minor -> 1.3.0
+		h.deleteBranch("feature/big")
+		h.want("1.3.0-alpha.4")
+
+		// Pin it back down to the patch range with a reference tag on the merge.
+		// On develop the label is always "alpha" and the counter is the develop
+		// section commit count (4 here), NOT the tag's own counter (.2) — only
+		// the tag's CORE is used, matching PropagatesToDevelop's convention.
+		h.tag("1.2.3-alpha.2", fm)
+		h.want("1.2.3-alpha.4") // reverted core 1.2.3; develop section count = 4
+
+		// New develop commits keep the 1.2.3 core, only the counter advances.
+		h.commit("d2")
+		h.want("1.2.3-alpha.5")
+
+		// Releasing that develop into main yields exactly 1.2.3.
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.2.3")
+	})
+
+	// A "+semver: major" on a develop commit AFTER the reference tag lifts the
+	// anchor above the tag's core; a plain commit would not.
+	t.Run("MarkerAfterTagRaisesAnchor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("1.2.2", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("feature/big")
+		h.commit("f1")
+		h.checkout("develop")
+		fm := h.merge("feature/big")
+		h.deleteBranch("feature/big")
+		h.tag("1.2.3-alpha.2", fm) // anchor to 1.2.3
+		h.want("1.2.3-alpha.4")
+
+		h.commit("plain") // plain commit: counter only
+		h.want("1.2.3-alpha.5")
+		h.commit("break +semver: major") // explicit marker after tag: lifts anchor
+		h.want("2.0.0-alpha.6")
+	})
+
+	// Multiple raise signals after the tag still lift the anchor only ONCE: the
+	// strongest single bump applies, extra signals of the same or lower strength
+	// only advance the counter. Here two feature merges and a "+semver: minor"
+	// after a 1.2.3 anchor together yield a single minor step to 1.3.0, not more.
+	t.Run("MultipleRaisesAfterTagLiftOnce", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("1.2.2", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		// Anchor develop to 1.2.3 on a plain develop commit.
+		dc := h.commit("d2")
+		h.tag("1.2.3-alpha.2", dc)
+		h.want("1.2.3-alpha.3") // reverted to the 1.2.3 anchor
+
+		// First feature merge after the tag lifts the anchor to minor.
+		h.newBranch("feature/one")
+		h.commit("f1")
+		h.checkout("develop")
+		h.merge("feature/one")
+		h.deleteBranch("feature/one")
+		h.want("1.3.0-alpha.5") // single minor step
+
+		// A second feature merge after the tag must NOT bump again: still minor,
+		// only the counter grows.
+		h.newBranch("feature/two")
+		h.commit("f2")
+		h.checkout("develop")
+		h.merge("feature/two")
+		h.deleteBranch("feature/two")
+		h.want("1.3.0-alpha.7") // still 1.3.0, counter only
+
+		// An explicit "+semver: minor" after the tag is the same strength as the
+		// feature merges: still a single minor step, counter only.
+		h.commit("more work +semver: minor")
+		h.want("1.3.0-alpha.8") // still 1.3.0
+	})
+
+	// A stronger signal after the tag wins over weaker ones, but still lifts the
+	// anchor exactly once: a "+semver: major" among several minor signals yields
+	// a single major step, not major-then-minor.
+	t.Run("StrongestRaiseAfterTagWinsOnce", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("1.2.2", mg)
+		h.checkout("develop")
+		h.merge("main")
+
+		dc := h.commit("d2")
+		h.tag("1.2.3-alpha.2", dc) // anchor to 1.2.3
+		h.want("1.2.3-alpha.3")
+
+		// A feature merge (minor) and a "+semver: major" both after the tag:
+		// the major dominates and applies once -> 2.0.0, not 2.1.0.
+		h.newBranch("feature/one")
+		h.commit("f1")
+		h.checkout("develop")
+		h.merge("feature/one")
+		h.deleteBranch("feature/one")
+		h.want("1.3.0-alpha.5") // minor so far
+
+		h.commit("breaking +semver: major")
+		h.want("2.0.0-alpha.6") // single major step, minor absorbed
+
+		h.commit("another break +semver: major")
+		h.want("2.0.0-alpha.7") // still 2.0.0, counter only
+	})
+
+	// Rule 2 for non-main/non-develop branches: the downward anchor is bounded by
+	// the boundary the branch builds on. Here main already released 2.0.0, so a
+	// 1.2.3 reference tag on a bugfix branch is BELOW the boundary and is ignored;
+	// the branch (and any later merge) must not produce an incorrect low bump.
+	t.Run("BlockedByHigherBoundaryOnBranch", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("2.0.0", mg) // main already at 2.0.0
+		h.checkout("develop")
+		h.merge("main")
+
+		h.newBranch("bugfix/low")
+		h.commit("b1")
+		h.tag("1.2.3-foobar.2", mustHead(t, h)) // below 2.0.0 boundary -> ignored
+		// Branch builds on 2.0.0, patch bump, branch label.
+		h.want("2.0.1-low.1")
+
+		// Merging into develop must also not drop below the boundary.
+		h.checkout("develop")
+		h.merge("bugfix/low")
+		h.deleteBranch("bugfix/low")
+		h.want("2.0.1-alpha.4")
+	})
+
+	// The anchor works on a non-develop branch when it is at or above the
+	// boundary: a bugfix branch off a 1.2.2 main, tagged 1.2.3-foobar.N, versions
+	// as 1.2.3 verbatim (tag label + counter), reverting the branch's own bump.
+	t.Run("AnchorOnBranchAboveBoundary", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h)) // main at 1.2.2 (boundary)
+
+		h.newBranch("feature/x")
+		h.commit("f1") // feature branch would bump minor -> 1.3.0
+		h.tag("1.2.3-foobar.2", mustHead(t, h))
+		h.want("1.2.3-foobar.2") // anchored to 1.2.3, reverting the minor bump
+
+		h.commit("f2") // plain commit: counter only
+		h.want("1.2.3-foobar.3")
+	})
+
+	// On a feature branch reverted to a patch anchor, merging ANOTHER feature
+	// branch into it lifts the anchor back to a minor bump: the incoming feature
+	// merge carries the weight of "+semver: minor" and sits above the tag.
+	t.Run("FeatureMergeIntoBranchLiftsAnchor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h)) // main at 1.2.2 (boundary)
+
+		// A sibling feature branch to merge in later.
+		h.newBranch("feature/b")
+		h.commit("b1")
+
+		// The working feature branch: reverted from minor to patch by a tag.
+		h.checkout("main")
+		h.newBranch("feature/a")
+		h.commit("a1")
+		h.tag("1.2.3-mywork.2", mustHead(t, h))
+		h.want("1.2.3-mywork.2") // anchored to 1.2.3
+
+		h.commit("a2") // plain commit: counter only, still patch range
+		h.want("1.2.3-mywork.3")
+
+		// Merge the other feature branch in: lifts the anchor back to minor.
+		h.merge("feature/b")
+		h.want("1.3.0-mywork.5") // feature merge above the tag -> minor
+	})
+
+	// On the branch path too, multiple raise signals after the tag lift the
+	// anchor only ONCE. Two feature merges after a 1.2.3 anchor on a branch yield
+	// a single minor step to 1.3.0; the second only advances the counter (which
+	// continues from the tag's counter plus commits after it).
+	t.Run("MultipleRaisesAfterTagLiftOnceOnBranch", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h)) // main at 1.2.2 (boundary)
+
+		// Two sibling feature branches to merge in later.
+		h.newBranch("feature/b")
+		h.commit("b1")
+		h.checkout("main")
+		h.newBranch("feature/c")
+		h.commit("c1")
+
+		// The working feature branch, reverted to a 1.2.3 anchor.
+		h.checkout("main")
+		h.newBranch("feature/a")
+		h.commit("a1")
+		h.tag("1.2.3-mywork.2", mustHead(t, h))
+		h.want("1.2.3-mywork.2") // anchored to 1.2.3
+
+		// First feature merge lifts to a single minor step.
+		h.merge("feature/b")
+		h.want("1.3.0-mywork.4") // tag counter 2 + (merge + b1) = 4
+
+		// Second feature merge must NOT bump again: still minor, counter grows.
+		h.merge("feature/c")
+		h.want("1.3.0-mywork.6") // still 1.3.0; tag counter 2 + 4 after = 6
+	})
+
+	// A plain (non-feature) merge into the reverted feature branch does NOT lift
+	// the anchor: it behaves like an ordinary commit, advancing the counter only.
+	t.Run("PlainMergeIntoBranchKeepsAnchor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+
+		h.newBranch("bugfix/b")
+		h.commit("b1")
+
+		h.checkout("main")
+		h.newBranch("feature/a")
+		h.commit("a1")
+		h.tag("1.2.3-mywork.2", mustHead(t, h))
+		h.want("1.2.3-mywork.2")
+
+		h.merge("bugfix/b") // non-feature merge: no explicit signal, counter only
+		h.want("1.2.3-mywork.4") // core stays 1.2.3
+	})
+
+	// Direct feature merge into main: a reference tag on the branch TIP anchors
+	// the core, but the feature merge (weight of "+semver: minor") sits above the
+	// tag and lifts it by a minor — so the tag alone does not revert the bump.
+	t.Run("FeatureMergeLiftsTagOnBranchTip", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+
+		h.newBranch("feature/ref")
+		h.commit("f1")
+		h.tag("1.2.3-foobar.2", mustHead(t, h)) // on the branch tip
+		h.checkout("main")
+		h.merge("feature/ref")
+		h.deleteBranch("feature/ref")
+		h.want("1.3.0") // anchor 1.2.3 lifted a minor by the feature merge
+	})
+
+	// To actually revert a feature merge's minor bump, the reference tag must sit
+	// on the MERGE COMMIT itself: nothing is then above the tag, so its core
+	// stands as the release.
+	t.Run("RevertFeatureMergeByTaggingMergeCommit", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.commit("m1")
+		h.tag("1.2.2", mustHead(t, h))
+
+		h.newBranch("feature/ref")
+		h.commit("f1")
+		h.checkout("main")
+		mc := h.merge("feature/ref") // feature merge would bump minor -> 1.3.0
+		h.deleteBranch("feature/ref")
+		h.tag("1.2.3-foobar.2", mc) // tag ON the merge commit reverts it
+		h.want("1.2.3")
 	})
 }
 
@@ -1588,6 +1924,81 @@ func TestReleaseMergeMessageSemver(t *testing.T) {
 	})
 }
 
+// TestBranchMergeIntoDevelopMessageSemver verifies that a "+semver:" directive
+// in the merge commit's OWN message, when a topic branch is merged INTO develop
+// (branch -> develop, as opposed to the develop -> main release merge), raises
+// the develop section's bump. Such a merge commit is an ordinary commit inside
+// develop's section, so its "+semver:" is honored by the section scan (via max
+// against the per-commit bump), just like a directive on any other commit —
+// without stacking an extra increment.
+func TestBranchMergeIntoDevelopMessageSemver(t *testing.T) {
+	t.Parallel()
+
+	// "+semver: major" on a bugfix merge into develop lifts the section (a
+	// patch's worth of change) to major.
+	t.Run("BugfixMergeMajor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.newBranch("bugfix/x")
+		h.commit("b1")
+		h.checkout("develop")
+		h.mergeMsg("bugfix/x", "Merge branch 'bugfix/x'\n\n+semver: major")
+		h.deleteBranch("bugfix/x")
+		h.want("1.0.0-alpha.2") // b1 + merge = 2 commits; merge marker raises major
+	})
+
+	// "+semver: minor" on a bugfix merge into develop lifts a patch-floor merge
+	// to minor without stacking (a feature merge would already be minor).
+	t.Run("BugfixMergeMinor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.newBranch("bugfix/x")
+		h.commit("b1")
+		h.checkout("develop")
+		h.mergeMsg("bugfix/x", "Merge branch 'bugfix/x'\n\n+semver: minor")
+		h.deleteBranch("bugfix/x")
+		h.want("0.2.0-alpha.2") // merge marker raises patch -> minor
+	})
+
+	// A "+semver: major" on a feature merge into develop wins over the feature
+	// merge's own minor floor (max, not stacking).
+	t.Run("FeatureMergeMajorBeatsFloor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: major")
+		h.deleteBranch("feature/x")
+		h.want("1.0.0-alpha.2") // major from the merge message dominates minor floor
+	})
+
+	// The develop-side bump propagates to the release: merging that develop into
+	// main tags the major-bumped core, confirming the branch->develop merge
+	// marker is not lost across the release merge.
+	t.Run("PropagatesToRelease", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.newBranch("bugfix/x")
+		h.commit("b1")
+		h.checkout("develop")
+		h.mergeMsg("bugfix/x", "Merge branch 'bugfix/x'\n\n+semver: major")
+		h.deleteBranch("bugfix/x")
+		h.want("1.0.0-alpha.2")
+		h.checkout("main")
+		h.merge("develop") // plain release merge, no marker of its own
+		h.want("1.0.0")     // develop's major-bumped core is released
+	})
+}
+
 // TestFeatureMergePropagatesThroughBugfix verifies that a feature merge's minor
 // bump is not lost when the feature branch is merged into a bugfix branch rather
 // than straight into develop. The minor bump must ride along at each hop:
@@ -1631,6 +2042,41 @@ func TestFeatureMergePropagatesThroughBugfix(t *testing.T) {
 	mg := h.merge("develop")
 	h.tag("0.2.0", mg)
 	h.want("0.2.0") // minor release
+}
+
+// TestFeatureMergeThroughBugfixDirectToMain verifies the same feature-merge
+// minor propagation when the bugfix branch is merged STRAIGHT into main (the
+// no-develop / hotfix flow) rather than through develop:
+//
+//	feature/bar --merge--> bugfix/foo --merge--> main
+//
+// The feature merge commit lives in the bugfix branch's history, so the direct
+// merge into main must see it and bump minor (not the bugfix's patch floor).
+func TestFeatureMergeThroughBugfixDirectToMain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root") // main = 0.1.0
+
+	// Bugfix branch off main; a plain commit is only a patch on its own.
+	h.newBranch("bugfix/foo")
+	h.commit("b1")
+	h.want("0.1.1-foo.1") // patch bump, no feature involved yet
+
+	// Feature branch off the bugfix branch, merged back into it: the feature
+	// merge lifts the bugfix branch to a minor.
+	h.newBranch("feature/bar")
+	h.commit("f1")
+	h.checkout("bugfix/foo")
+	h.merge("feature/bar") // "Merge branch 'feature/bar'"
+	h.deleteBranch("feature/bar")
+	h.want("0.2.0-foo.3") // minor now: b1 + f1 + merge = 3 commits
+
+	// Merge the bugfix branch directly into main: the feature merge in the
+	// bugfix's history must lift the direct merge to a minor, applied once.
+	h.checkout("main")
+	h.merge("bugfix/foo")
+	h.deleteBranch("bugfix/foo")
+	h.want("0.2.0") // minor release, not a patch
 }
 
 // TestMultipleMergesBumpOnce verifies that a version bump is a single-step

@@ -1,6 +1,6 @@
 BINARY := givi
 
-VERSION ?= $(shell go run . 2>/dev/null)
+VERSION ?= $(shell go run . --format='v{{.Core}}-{{substr 0 7 .HeadHash}}' 2>/dev/null)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 .PHONY: build install fix test clean release-preview

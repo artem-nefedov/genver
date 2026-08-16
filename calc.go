@@ -126,7 +126,7 @@ func short(h plumbing.Hash) string {
 // Restricting the forward pass to the region above the newest tag is the key to
 // performance: everything at or below that tag is already described by the tags
 // themselves, so we never walk history for it. The expensive per-untagged-merge
-// core computation (developVersion / directMergeBump, each a history walk) runs
+// core computation (developVersion / directMergeCore, each a history walk) runs
 // only for the typically small set of commits made since the last release —
 // avoiding a quadratic blowup on large, densely tagged repositories. When there
 // is no tag at all, the pass covers the whole chain starting from the 0.1.0
@@ -230,21 +230,13 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 			}
 			cur = dc
 		} else {
-			// Direct merge of a non-develop branch: advance the core once, then
-			// let any prerelease reference tag the merge carried in pin a higher
-			// core.
-			bump, berr := c.directMergeBump(cm)
+			// Direct merge of a non-develop branch: advance the core once,
+			// honoring any reference tag the merge carried in (anchor up/down).
+			dc, berr := c.directMergeCore(cm, cur)
 			if berr != nil {
 				return nil, berr
 			}
-			cur = cur.bump(bump)
-			floor, ferr := c.directMergeRefFloor(cm)
-			if ferr != nil {
-				return nil, ferr
-			}
-			if less(cur, floor) {
-				cur = floor
-			}
+			cur = dc
 		}
 		add(p, cur, plumbing.ZeroHash)
 	}
@@ -301,6 +293,17 @@ type sectionScan struct {
 	count       int           // number of commits in the section (base..start)
 	bump        bumpKind      // strongest version bump those commits imply
 	refFloor    core          // highest prerelease-reference core within the section (zero if none)
+
+	// hasRef reports whether a prerelease reference tag was found in the section
+	// (base..start). When set, refAnchor is the core that tag anchors the
+	// section to: the tag's core raised by the bump of the commits strictly
+	// after the tagged commit (a "+semver:" directive or feature merge landing
+	// after the tag can still lift the anchor). Unlike refFloor, which can only
+	// raise the computed core, refAnchor REPLACES the section's own bump (so a
+	// reference tag can pull the core back down), bounded from below by baseCore
+	// (a reference tag can never sink the section below the release it builds on).
+	hasRef    bool
+	refAnchor core
 }
 
 // scanSection determines the release boundary a commit builds on and analyses
@@ -367,105 +370,152 @@ func (c *calculator) scanSectionInPool(start plumbing.Hash, excludeStart bool, p
 		return sectionScan{}, err
 	}
 
-	// Count and bump over base..start: reachable from start, excluding the base
-	// and everything reachable from it.
+	// Analyse base..start in a single walk: count, bump, and any reference tag.
 	exclude := ancestorHashesIn(res.baseHash, pool)
-	count, bump, err := c.countAndBumpInPool(start, exclude, pool)
+	rs, err := c.scanRange(start, exclude, pool)
 	if err != nil {
 		return sectionScan{}, err
 	}
-	res.count, res.bump = count, bump
+	res.count, res.bump = rs.count, rs.bump
+	res.refFloor = rs.floorRef
 
-	// Highest prerelease-reference core within the section (base..start): a
-	// reference tag carried in by a merged branch pins an in-progress core that
-	// the section's release must be at least as high as.
-	floor, err := c.refFloorInSection(start, exclude, pool)
-	if err != nil {
-		return sectionScan{}, err
+	// A reference tag also ANCHORS the section: the tag nearest the section tip
+	// pins the core to its own core, raised only by EXPLICIT bumps on commits
+	// after the tag, letting a reference tag pull the core back down as well as
+	// up. The anchor is bounded from below by the base core (applied by the
+	// consumers via max(baseCore, refAnchor)). The after-tag bump needs its own
+	// walk because its range (tag..start) differs from the section's.
+	if rs.hasRef {
+		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
+		after, aerr := c.scanRange(start, afterExclude, pool)
+		if aerr != nil {
+			return sectionScan{}, aerr
+		}
+		res.hasRef = true
+		res.refAnchor = rs.nearestRef.core.bump(after.explicitBump)
 	}
-	res.refFloor = floor
 	return res, nil
 }
 
-// refFloorInSection returns the highest prerelease-reference core among commits
-// reachable from start but not in exclude (i.e. the section base..start). The
-// zero core is returned when the section carries no reference tag. If the commit
-// that supplies the winning floor is ambiguous (conflicting tags), an error is
-// returned, since that reference is relevant to the answer.
-func (c *calculator) refFloorInSection(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (core, error) {
-	var floor core
-	var floorHash plumbing.Hash
-	if len(c.refs) == 0 {
-		return floor, nil
-	}
-	seen := map[plumbing.Hash]bool{}
-	stack := []plumbing.Hash{start}
-	for len(stack) > 0 {
-		h := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[h] || exclude[h] {
-			continue
-		}
-		seen[h] = true
-		if pr, ok := c.refs[h]; ok && less(floor, pr.core) {
-			floor = pr.core
-			floorHash = h
-		}
-		for _, ph := range pool[h] {
-			if !seen[ph] && !exclude[ph] {
-				stack = append(stack, ph)
-			}
-		}
-	}
-	if err := c.conflictAt(floorHash); err != nil {
-		return core{}, err
-	}
-	return floor, nil
+// rangeScan is the full analysis of a commit range base..start, produced by a
+// single walk (scanRange). It answers every question the version calculation
+// asks about a range so that no range is ever walked more than once.
+type rangeScan struct {
+	count        int           // number of commits in the range
+	bump         bumpKind      // strongest bump WITH a patch floor (ordinary commit -> patch)
+	explicitBump bumpKind      // strongest EXPLICIT bump (no floor): "+semver:"/feature merge only
+	hasRef       bool          // whether a prerelease reference tag was found in the range
+	nearestRef   prereleaseRef // the reference tag nearest the range tip (by graph distance)
+	nearestHash  plumbing.Hash // the commit the nearest reference sits on
+	floorRef     core          // highest prerelease-reference core in the range (raise-only floor)
+	floorHash    plumbing.Hash // the commit supplying floorRef
 }
 
-// countAndBumpInPool walks the commits reachable from start but not in exclude,
-// following the parent edges in a pre-built pool, returning their number and the
-// strongest version bump they imply. Only the commits actually in the section
-// have their full object decoded (to read the message and detect feature
-// merges) — the reachability edges come from the cheap pool.
-func (c *calculator) countAndBumpInPool(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (int, bumpKind, error) {
-	seen := map[plumbing.Hash]bool{}
-	stack := []plumbing.Hash{start}
-	count := 0
-	bump := bumpNone
-	for len(stack) > 0 {
-		h := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		if seen[h] || exclude[h] {
+// scanRange walks the commits reachable from start but not in exclude exactly
+// ONCE, computing the commit count, the patch-floored bump, the floorless
+// explicit bump, and both the nearest-to-tip and highest-core prerelease
+// reference in the range. Consolidating these into one pass avoids re-walking
+// the same range for each quantity. Reference-tag bookkeeping is skipped
+// entirely when the repository has no reference tags. The nearest reference wins
+// ties in distance toward the higher core so the anchor is deterministic; both
+// the nearest and highest reference commits are checked for tag conflicts, since
+// either may be relevant to the answer.
+func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (rangeScan, error) {
+	var res rangeScan
+	haveRefs := len(c.refs) > 0
+	// A distance map doubles as the "seen" set; the BFS order it imposes is only
+	// needed for the nearest-reference tie-break but is harmless otherwise.
+	dist := map[plumbing.Hash]int{start: 0}
+	queue := []plumbing.Hash{start}
+	bestDist := -1
+	for len(queue) > 0 {
+		h := queue[0]
+		queue = queue[1:]
+		if exclude[h] {
 			continue
 		}
-		seen[h] = true
 		parents, ok := pool[h]
 		if !ok {
 			continue
 		}
-		count++
-		// The strongest possible bump is major; once reached, no need to decode
-		// further commits for their bump. The message and parent count are only
-		// needed to raise the bump, so decode the full commit lazily.
-		if bump < bumpMajor {
+		res.count++
+		// Decode the commit only while it can still change a bump; once both
+		// bumps have peaked at major there is nothing left to learn from messages.
+		if res.bump < bumpMajor || res.explicitBump < bumpMajor {
 			commit, err := c.g.r.CommitObject(h)
 			if err != nil {
-				return 0, bumpNone, err
+				return rangeScan{}, err
 			}
-			b := max(bumpPatch, bumpFromMessage(commit.Message))
+			explicit := bumpFromMessage(commit.Message)
 			if isFeatureMerge(commit) {
-				b = max(b, bumpMinor)
+				explicit = max(explicit, bumpMinor)
 			}
-			bump = max(bump, b)
+			res.explicitBump = max(res.explicitBump, explicit)
+			res.bump = max(res.bump, max(bumpPatch, explicit))
+		}
+		if haveRefs {
+			if pr, ok := c.refs[h]; ok {
+				d := dist[h]
+				if bestDist < 0 || d < bestDist || (d == bestDist && less(res.nearestRef.core, pr.core)) {
+					bestDist = d
+					res.nearestRef = pr
+					res.nearestHash = h
+					res.hasRef = true
+				}
+				if less(res.floorRef, pr.core) {
+					res.floorRef = pr.core
+					res.floorHash = h
+				}
+			}
 		}
 		for _, ph := range parents {
-			if !seen[ph] && !exclude[ph] {
-				stack = append(stack, ph)
+			if exclude[ph] {
+				continue
+			}
+			if _, seen := dist[ph]; seen {
+				continue
+			}
+			dist[ph] = dist[h] + 1
+			queue = append(queue, ph)
+		}
+	}
+	if res.hasRef {
+		if err := c.conflictAt(res.nearestHash); err != nil {
+			return rangeScan{}, err
+		}
+		if res.floorHash != res.nearestHash {
+			if err := c.conflictAt(res.floorHash); err != nil {
+				return rangeScan{}, err
 			}
 		}
 	}
-	return count, bump, nil
+	return res, nil
+}
+
+// sectionCore reduces a completed section scan to its release core, applying
+// prerelease-reference semantics. extraBump is an additional bump that applies
+// "after" the whole section (e.g. a "+semver:" directive on a release-merge
+// commit that sits above the section); it raises both the plain computed bump
+// and, being after every tagged commit, the reference anchor. When the section
+// carries a reference tag whose anchor core is at least as high as the base
+// release, the anchor REPLACES the section's own bump (so a reference tag can
+// pull the core back down as well as up); otherwise the core is the base release
+// raised by the section's bump, then lifted by any (raise-only) reference floor.
+// baseCore always bounds the result from below: a reference tag can never sink
+// the section beneath the release it builds on.
+func (s sectionScan) core(extraBump bumpKind) core {
+	if s.hasRef {
+		anchor := s.refAnchor.bump(extraBump)
+		if !less(anchor, s.baseCore) {
+			// anchor >= baseCore: the tag anchors the core.
+			return anchor
+		}
+	}
+	out := s.baseCore.bump(max(s.bump, extraBump))
+	if less(out, s.refFloor) {
+		out = s.refFloor
+	}
+	return out
 }
 
 // developVersion computes the (core, counter, base-"v"-prefix) for a develop
@@ -495,11 +545,7 @@ func (c *calculator) developVersion(head *object.Commit) (core, int, bool, error
 	if err != nil {
 		return core{}, 0, false, err
 	}
-	out := scan.baseCore.bump(scan.bump)
-	if less(out, scan.refFloor) {
-		c.logf("develop: reference floor %s raises core above computed %s", scan.refFloor, out)
-		out = scan.refFloor
-	}
+	out := scan.core(bumpNone)
 	c.logf("develop: section starts at boundary %s (%s); bump = %s; %d commit(s); core %s -> %s",
 		short(scan.baseHash), scan.baseCore, scan.bump, scan.count, scan.baseCore, out)
 	return out, scan.count, scan.baseVPrefix, nil
@@ -528,12 +574,8 @@ func (c *calculator) developReleaseCore(tip *object.Commit, extraBump bumpKind) 
 	if err != nil {
 		return core{}, err
 	}
-	out := scan.baseCore.bump(max(scan.bump, extraBump))
-	if less(out, scan.refFloor) {
-		out = scan.refFloor
-	}
-	c.logf("develop: release-merge +semver raises bump to %s; core %s -> %s",
-		max(scan.bump, extraBump), scan.baseCore, out)
+	out := scan.core(extraBump)
+	c.logf("develop: release-merge +semver (bump %s); core %s -> %s", extraBump, scan.baseCore, out)
 	return out, nil
 }
 
@@ -600,26 +642,15 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 			// Direct merge of a non-develop branch into main (a hotfix-style
 			// flow). A feature-branch merge bumps minor; any other branch bumps
 			// patch. Either floor is raised when a merged-in commit requests a
-			// stronger bump. The whole merge advances the core exactly once.
+			// stronger bump, and a reference tag the merge carried in can anchor
+			// the core (up or down). The whole merge advances the core once.
 			branch := mergedBranchName(cm)
-			bump, err := c.directMergeBump(cm)
+			next, err := c.directMergeCore(cm, cur)
 			if err != nil {
 				return core{}, false, err
 			}
-			next := cur.bump(bump)
-			c.logf("main: direct merge of %q %s -> %s bump: %s -> %s", branch, short(cm.Hash), bump, cur, next)
+			c.logf("main: direct merge of %q %s -> %s -> %s", branch, short(cm.Hash), cur, next)
 			cur = next
-
-			// A prerelease reference tag carried in by the merged branch pins the
-			// release core when it is higher than the bumped core.
-			floor, err := c.directMergeRefFloor(cm)
-			if err != nil {
-				return core{}, false, err
-			}
-			if less(cur, floor) {
-				c.logf("main: reference floor %s raises core above %s", floor, cur)
-				cur = floor
-			}
 		}
 	}
 	return cur, baseVPrefix, nil
@@ -635,52 +666,35 @@ func (c *calculator) isDevelopReleaseMerge(cm *object.Commit) bool {
 	return name == "" || name == "develop"
 }
 
-// directMergeBump computes how far a direct merge of a non-develop branch into
-// main advances the release core. The merge advances the core exactly once: a
-// feature-branch merge has a minor floor, any other branch a patch floor. That
-// floor is also raised by a "+semver:" directive in the merge commit's own
-// message, and by any commit the merge brought in that requests a stronger bump
-// (via a "+semver:" directive or by itself being a feature merge). The commits
-// considered are those reachable from the merged tip (second parent) but not
-// from main's prior tip (first parent), i.e. exactly what the merge introduced.
-func (c *calculator) directMergeBump(cm *object.Commit) (bumpKind, error) {
+// directMergeCore computes the release core after a direct merge of a
+// non-develop branch into main, building on the running main core base. The
+// merge advances the core exactly once: a feature-branch merge floors at minor,
+// any other branch at patch, and a "+semver:" directive on the merge commit or
+// on any introduced commit can raise it further. A prerelease reference tag the
+// merge carried in anchors the core to the tag's core; that anchor is still
+// raised by explicit signals ABOVE the tag — a "+semver:" directive or a feature
+// merge, which carry equal weight — so a feature merge whose branch tip is
+// tagged still applies its minor on top of the anchor. Placing the tag on the
+// merge commit itself (nothing after it) reverts the merge's own bump. The
+// anchor can pull the result DOWN as well as up, but never below base, the
+// release main already sits at. The commits considered are those reachable from
+// the merged tip (second parent) but not from main's prior tip (first parent).
+func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error) {
+	// A feature merge carries the same weight as "+semver: minor" and, like an
+	// explicit directive on the merge commit, sits ABOVE the merged section, so
+	// it lifts a reference anchor. A non-feature merge's patch floor is not such
+	// an explicit signal (a plain merge behaves like a plain commit for anchor
+	// purposes): it advances the non-anchor core but does not lift the anchor.
+	mergeSignal := bumpFromMessage(cm.Message)
+	if isFeatureMerge(cm) {
+		mergeSignal = max(mergeSignal, bumpMinor)
+	}
 	floor := bumpPatch
 	if isFeatureMerge(cm) {
 		floor = bumpMinor
 	}
-	// A "+semver:" directive on the merge commit itself can raise the floor,
-	// mirroring how the same directive on a merged-in commit is honored below.
-	floor = max(floor, bumpFromMessage(cm.Message))
-	p0, err := cm.Parent(0)
-	if err != nil {
-		return bumpNone, err
-	}
-	p1, err := cm.Parent(1)
-	if err != nil {
-		return bumpNone, err
-	}
-	pool, err := c.g.parentPool(cm.Hash)
-	if err != nil {
-		return bumpNone, err
-	}
-	exclude := ancestorHashesIn(p0.Hash, pool)
-	_, rangeBump, err := c.countAndBumpInPool(p1.Hash, exclude, pool)
-	if err != nil {
-		return bumpNone, err
-	}
-	return max(floor, rangeBump), nil
-}
+	mergeBump := max(floor, mergeSignal)
 
-// directMergeRefFloor returns the highest prerelease-reference core among the
-// commits a direct merge into main introduced (reachable from the merged tip,
-// the second parent, but not from main's prior tip, the first parent). It is the
-// zero core when the merged branch carried no reference tag. This lets a
-// reference-tagged branch merged straight into main (the no-develop / hotfix
-// flow) pin the release core exactly as it does through develop.
-func (c *calculator) directMergeRefFloor(cm *object.Commit) (core, error) {
-	if len(c.refs) == 0 {
-		return core{}, nil
-	}
 	p0, err := cm.Parent(0)
 	if err != nil {
 		return core{}, err
@@ -694,7 +708,39 @@ func (c *calculator) directMergeRefFloor(cm *object.Commit) (core, error) {
 		return core{}, err
 	}
 	exclude := ancestorHashesIn(p0.Hash, pool)
-	return c.refFloorInSection(p1.Hash, exclude, pool)
+	rs, err := c.scanRange(p1.Hash, exclude, pool)
+	if err != nil {
+		return core{}, err
+	}
+
+	scan := sectionScan{baseCore: base, bump: max(mergeBump, rs.bump)}
+	// The merge commit itself sits above every introduced commit, so a reference
+	// tag on it is the newest anchor. Being AT the merge, the merge's own signal
+	// (feature-minor or a "+semver:" directive) is part of the tagged commit and
+	// does not lift the anchor — this is how a feature merge's bump is reverted.
+	if selfRef, ok := c.refs[cm.Hash]; ok {
+		if err := c.conflictAt(cm.Hash); err != nil {
+			return core{}, err
+		}
+		scan.hasRef = true
+		scan.refAnchor = selfRef.core
+		scan.refFloor = selfRef.core
+		return scan.core(bumpNone), nil
+	}
+	if rs.hasRef {
+		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
+		after, aerr := c.scanRange(p1.Hash, afterExclude, pool)
+		if aerr != nil {
+			return core{}, aerr
+		}
+		scan.hasRef = true
+		scan.refAnchor = rs.nearestRef.core.bump(after.explicitBump)
+		scan.refFloor = rs.nearestRef.core
+	}
+	// Explicit signals on the merge commit (a "+semver:" directive or a feature
+	// merge, equal weight) sit above the merged section, so they lift the anchor;
+	// a non-feature merge's patch floor does not.
+	return scan.core(mergeSignal), nil
 }
 
 // integrationBranch returns the tip and name of the branch that short-lived
@@ -761,10 +807,11 @@ func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Comm
 // no accumulated bump — the branch builds straight on main's release core.
 //
 // A prerelease reference tag on one of the branch's own commits (e.g.
-// "4.5.6-foobar-x.3") can override all of this: when its core is higher than the
-// normally-computed core, calculation continues from the tag — its core and
-// label are used, and the counter continues from the tag's counter plus the
-// commits made after it. When the computed core is higher, the tag is ignored.
+// "4.5.6-foobar-x.3") can override all of this: it ANCHORS the version to the
+// tag's core (raised by any explicit "+semver:"/feature bump on commits after
+// the tag), using the tag's label and continuing its counter. The anchor can
+// pull the core down as well as up, but never below the release boundary the
+// branch builds on; a tag whose anchor is below that boundary is ignored.
 func (c *calculator) otherVersion(head *object.Commit, branch string) (core, string, int, bool, error) {
 	integrationTip, integration, err := c.integrationBranch()
 	if err != nil {
@@ -812,14 +859,16 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 
 	// The branch's own commits (reachable from head but not from the fork point)
 	// contribute at least a patch bump. Exclude everything reachable from the
-	// fork point so the count matches `git rev-list mb..head`.
+	// fork point so the count matches `git rev-list mb..head`. One walk yields
+	// the count, the bump, and any reference tag among the branch's commits.
 	mbSet := ancestorHashesIn(mb.Hash, pool)
-	n, branchBump, err := c.countAndBumpInPool(head.Hash, mbSet, pool)
+	rs, err := c.scanRange(head.Hash, mbSet, pool)
 	if err != nil {
 		return core{}, "", 0, false, err
 	}
-	c.logf("other: branch's own commits bump = %s", branchBump)
-	eff := max(sectionBump, branchBump)
+	n := rs.count
+	c.logf("other: branch's own commits bump = %s", rs.bump)
+	eff := max(sectionBump, rs.bump)
 	if isFeatureBranch(branch) {
 		eff = max(eff, bumpMinor) // feature increment takes precedence
 		c.logf("other: feature branch -> effective bump forced to at least minor")
@@ -828,74 +877,30 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	out := belowCore.bump(eff)
 	c.logf("other: effective bump = %s; %d commit(s) since fork point; core %s -> %s", eff, n, belowCore, out)
 
-	// A prerelease reference tag among the branch's own commits (mb..head) can
-	// take over when its core is at least as high as the computed core.
-	if ref, refHash, after, ok, rerr := c.nearestRef(head.Hash, mbSet, pool); rerr != nil {
-		return core{}, "", 0, false, rerr
-	} else if ok {
-		if less(out, ref.core) || out == ref.core {
-			counter := ref.counter + after
-			c.logf("other: reference tag on %s (%s-%s.%d) wins; counter = %d + %d after = %d",
-				short(refHash), ref.core, ref.label, ref.counter, ref.counter, after, counter)
-			return ref.core, ref.label, counter, baseVPrefix, nil
+	// A prerelease reference tag among the branch's own commits (mb..head)
+	// anchors the version to the tag's core, continuing the tag's label and
+	// counter. The anchor is raised only by EXPLICIT bumps on commits after the
+	// tag; it can pull the core DOWN as well as up, but never below belowCore —
+	// the release boundary the branch builds on. When the tag's anchor is below
+	// that boundary, the tag is ignored and the normally-computed core stands.
+	if rs.hasRef {
+		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
+		after, aerr := c.scanRange(head.Hash, afterExclude, pool)
+		if aerr != nil {
+			return core{}, "", 0, false, aerr
 		}
-		c.logf("other: reference tag on %s (%s) is lower than computed core %s; ignored",
-			short(refHash), ref.core, out)
+		anchor := rs.nearestRef.core.bump(after.explicitBump)
+		if !less(anchor, belowCore) {
+			counter := rs.nearestRef.counter + after.count
+			c.logf("other: reference tag on %s (%s-%s.%d) anchors core to %s; counter = %d + %d after = %d",
+				short(rs.nearestHash), rs.nearestRef.core, rs.nearestRef.label, rs.nearestRef.counter, anchor, rs.nearestRef.counter, after.count, counter)
+			return anchor, rs.nearestRef.label, counter, baseVPrefix, nil
+		}
+		c.logf("other: reference tag on %s (anchor %s) is below base boundary %s; ignored",
+			short(rs.nearestHash), anchor, belowCore)
 	}
 
 	return out, "", n, baseVPrefix, nil
-}
-
-// nearestRef finds the prerelease reference tag nearest to head among the
-// commits reachable from head but not in exclude (i.e. the branch's own
-// commits). "Nearest" is by graph distance from head. It returns the reference,
-// the commit it sits on, the number of the branch's own commits strictly after
-// that commit (which continue the counter), and whether one was found.
-func (c *calculator) nearestRef(head plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (prereleaseRef, plumbing.Hash, int, bool, error) {
-	if len(c.refs) == 0 {
-		return prereleaseRef{}, plumbing.ZeroHash, 0, false, nil
-	}
-	// BFS from head over the branch's own commits, recording distance.
-	dist := map[plumbing.Hash]int{head: 0}
-	queue := []plumbing.Hash{head}
-	bestHash := plumbing.ZeroHash
-	bestDist := -1
-	for len(queue) > 0 {
-		h := queue[0]
-		queue = queue[1:]
-		if _, ok := c.refs[h]; ok {
-			if bestDist < 0 || dist[h] < bestDist {
-				bestDist = dist[h]
-				bestHash = h
-			}
-		}
-		for _, ph := range pool[h] {
-			if exclude[ph] {
-				continue
-			}
-			if _, seen := dist[ph]; seen {
-				continue
-			}
-			dist[ph] = dist[h] + 1
-			queue = append(queue, ph)
-		}
-	}
-	if bestDist < 0 {
-		return prereleaseRef{}, plumbing.ZeroHash, 0, false, nil
-	}
-	// The selected reference tag is relevant to the answer: fail if ambiguous.
-	if err := c.conflictAt(bestHash); err != nil {
-		return prereleaseRef{}, plumbing.ZeroHash, 0, false, err
-	}
-	// Count the branch's own commits strictly after (i.e. that reach) the
-	// reference commit: everything from head excluding the reference commit and
-	// its ancestors.
-	afterExclude := ancestorHashesIn(bestHash, pool)
-	after, _, err := c.countAndBumpInPool(head, afterExclude, pool)
-	if err != nil {
-		return prereleaseRef{}, plumbing.ZeroHash, 0, false, err
-	}
-	return c.refs[bestHash], bestHash, after, true, nil
 }
 
 // isFeatureBranch reports whether the branch's type prefix (before the first

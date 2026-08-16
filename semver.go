@@ -37,20 +37,26 @@ func (k bumpKind) String() string {
 var semverCodeRe = regexp.MustCompile(`\+semver:\s*(major|minor|patch)`)
 
 // bumpFromMessage returns the bump requested by a "+semver:" code in the
-// message, or bumpNone if there is none.
+// message, or bumpNone if there is none. When the message carries several
+// "+semver:" directives (in any order), the strongest one wins (patch < minor <
+// major), so the result is order-independent.
 func bumpFromMessage(msg string) bumpKind {
-	m := semverCodeRe.FindStringSubmatch(strings.ToLower(msg))
-	if m == nil {
+	ms := semverCodeRe.FindAllStringSubmatch(strings.ToLower(msg), -1)
+	if ms == nil {
 		return bumpNone
 	}
-	switch m[1] {
-	case "major":
-		return bumpMajor
-	case "minor":
-		return bumpMinor
-	default:
-		return bumpPatch
+	bump := bumpNone
+	for _, m := range ms {
+		switch m[1] {
+		case "major":
+			bump = max(bump, bumpMajor)
+		case "minor":
+			bump = max(bump, bumpMinor)
+		default:
+			bump = max(bump, bumpPatch)
+		}
 	}
+	return bump
 }
 
 // core is a bare major.minor.patch version with no prerelease or metadata.

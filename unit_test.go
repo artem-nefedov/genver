@@ -1197,6 +1197,90 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0") // minor from the merged commit, applied once
 	})
 
+	// A "+semver: major" in the MERGE COMMIT'S OWN message (not on a commit
+	// inside the merged branch) raises a feature merge's minor floor to major.
+	t.Run("FeatureMergeMessageMajor1", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("feature/big")
+		h.commit("f1")
+		h.commit("f2")
+		h.checkout("main")
+		h.mergeMsg("feature/big", "Merge branch 'feature/big'\n\n+semver: major")
+		h.deleteBranch("feature/big")
+		h.want("1.0.0") // major from the merge commit message, applied once
+	})
+
+	// A "+semver: minor" in the merge commit's own message raises a non-feature
+	// (patch-floor) merge to minor.
+	t.Run("BugfixMergeMessageMinor1", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("hotfix/urgent")
+		h.commit("h1")
+		h.checkout("main")
+		h.mergeMsg("hotfix/urgent", "Merge branch 'hotfix/urgent'\n\n+semver: minor")
+		h.deleteBranch("hotfix/urgent")
+		h.want("0.2.0") // minor from the merge commit message, applied once
+	})
+
+	// Without merge commit part in the message
+	t.Run("FeatureMergeMessageMajor2", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("feature/big")
+		h.commit("f1")
+		h.commit("f2")
+		h.checkout("main")
+		h.mergeMsg("feature/big", "+semver: major")
+		h.deleteBranch("feature/big")
+		h.want("1.0.0") // major from the merge commit message, applied once
+	})
+
+	// Without merge commit part in the message
+	t.Run("BugfixMergeMessageMinor2", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("hotfix/urgent")
+		h.commit("h1")
+		h.checkout("main")
+		h.mergeMsg("hotfix/urgent", "+semver: minor")
+		h.deleteBranch("hotfix/urgent")
+		h.want("0.2.0") // minor from the merge commit message, applied once
+	})
+
+	// A "+semver: minor" in the merge message does not lower a feature merge's
+	// minor floor, nor does it stack a second increment: the result is minor.
+	t.Run("FeatureMergeMessageMinorNoStack", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: minor")
+		h.deleteBranch("feature/x")
+		h.want("0.2.0") // minor floor and minor marker agree: bumped once
+	})
+
+	// A "+semver: major" in the merge message wins over a weaker "+semver: minor"
+	// on a commit inside the merged branch (max, not stacking).
+	t.Run("MergeMessageBeatsInnerCommit", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("hotfix/urgent")
+		h.commit("h1 +semver: minor")
+		h.checkout("main")
+		h.mergeMsg("hotfix/urgent", "Merge branch 'hotfix/urgent'\n\n+semver: major")
+		h.deleteBranch("hotfix/urgent")
+		h.want("1.0.0") // major from the merge message dominates the inner minor
+	})
+
 	// A direct merge into main above an existing release tag builds on that tag
 	// and still advances only once.
 	t.Run("FeatureAfterRelease", func(t *testing.T) {
@@ -1452,6 +1536,55 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.mergePR("bugfix/ABC-9", 8, "acme-org")
 		h.deleteBranch("bugfix/ABC-9")
 		h.want("0.1.1-alpha.2") // bugfix -> patch bump only, not minor
+	})
+}
+
+// TestReleaseMergeMessageSemver verifies that a "+semver:" directive in the
+// develop->main release-merge commit's own message raises the release bump level
+// (via max), not by stacking an extra increment. The develop section otherwise
+// carries only a patch's worth of change, so the marker is what lifts the core.
+func TestReleaseMergeMessageSemver(t *testing.T) {
+	t.Parallel()
+
+	// "+semver: major" on the release merge lifts the release from the section's
+	// patch level to major.
+	t.Run("Major", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.commit("d1") // develop section: a single patch's worth of change
+		h.want("0.1.1-alpha.1")
+		h.checkout("main")
+		h.mergeMsg("develop", "Merge branch 'develop'\n\n+semver: major")
+		h.want("1.0.0") // release-merge marker raises patch -> major
+	})
+
+	// "+semver: minor" on the release merge lifts a patch-level section to minor.
+	t.Run("Minor", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.commit("d1")
+		h.want("0.1.1-alpha.1")
+		h.checkout("main")
+		h.mergeMsg("develop", "Merge branch 'develop'\n\n+semver: minor")
+		h.want("0.2.0") // release-merge marker raises patch -> minor
+	})
+
+	// A "+semver: minor" on the release merge does not lower a develop section
+	// that already earned a major (via a develop commit's own marker): max wins.
+	t.Run("DoesNotLowerSectionBump", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+		h.newBranch("develop")
+		h.commit("rework +semver: major")
+		h.want("1.0.0-alpha.1")
+		h.checkout("main")
+		h.mergeMsg("develop", "Merge branch 'develop'\n\n+semver: minor")
+		h.want("1.0.0") // section's major dominates the merge's minor
 	})
 }
 

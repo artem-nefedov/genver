@@ -221,8 +221,10 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 		}
 		if c.isDevelopReleaseMerge(cm) {
 			// Release merge from develop: the core is develop's core at the
-			// merged tip, built on the boundaries registered so far.
-			dc, _, _, derr := c.developVersion(p)
+			// merged tip, built on the boundaries registered so far. A
+			// "+semver:" directive on the release-merge commit itself raises the
+			// bump level (via max) just as it would on any other commit.
+			dc, derr := c.developReleaseCore(p, bumpFromMessage(cm.Message))
 			if derr != nil {
 				return nil, derr
 			}
@@ -503,6 +505,38 @@ func (c *calculator) developVersion(head *object.Commit) (core, int, bool, error
 	return out, scan.count, scan.baseVPrefix, nil
 }
 
+// developReleaseCore returns the release core for a develop tip being merged
+// into main, with its section bump level raised via max by extraBump. extraBump
+// is the bump requested by the release-merge commit's own "+semver:" directive:
+// like every other "+semver:" it sets the bump LEVEL (patch<minor<major) rather
+// than stacking an additional increment, so max is applied to the section bump
+// before it is applied to the base core. When develop's tip is itself a release
+// boundary (a tag pins the core) there is no section bump to raise, so the
+// pinned core is returned unchanged.
+func (c *calculator) developReleaseCore(tip *object.Commit, extraBump bumpKind) (core, error) {
+	if extraBump == bumpNone {
+		dc, _, _, err := c.developVersion(tip)
+		return dc, err
+	}
+	if bcore, ok := c.isBoundary(tip); ok {
+		if err := c.boundaryConflictAt(tip.Hash); err != nil {
+			return core{}, err
+		}
+		return bcore, nil
+	}
+	scan, err := c.scanSection(tip, false)
+	if err != nil {
+		return core{}, err
+	}
+	out := scan.baseCore.bump(max(scan.bump, extraBump))
+	if less(out, scan.refFloor) {
+		out = scan.refFloor
+	}
+	c.logf("develop: release-merge +semver raises bump to %s; core %s -> %s",
+		max(scan.bump, extraBump), scan.baseCore, out)
+	return out, nil
+}
+
 // mainVersion computes the release core for a commit on the main branch, plus
 // whether the base tag it builds on is "v"-prefixed (so the caller can default
 // the output spelling to it).
@@ -549,12 +583,13 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 
 		case c.isDevelopReleaseMerge(cm):
 			// Release merge from develop: the release core is develop's core at
-			// the merged tip (second parent).
+			// the merged tip (second parent). A "+semver:" directive on the
+			// release-merge commit itself raises the bump level (via max).
 			p, err := cm.Parent(1)
 			if err != nil {
 				return core{}, false, err
 			}
-			dc, _, _, err := c.developVersion(p)
+			dc, err := c.developReleaseCore(p, bumpFromMessage(cm.Message))
 			if err != nil {
 				return core{}, false, err
 			}
@@ -603,16 +638,19 @@ func (c *calculator) isDevelopReleaseMerge(cm *object.Commit) bool {
 // directMergeBump computes how far a direct merge of a non-develop branch into
 // main advances the release core. The merge advances the core exactly once: a
 // feature-branch merge has a minor floor, any other branch a patch floor. That
-// floor is then raised if any commit the merge brought in requests a stronger
-// bump (via a "+semver:" directive or by itself being a feature merge). The
-// commits considered are those reachable from the merged tip (second parent)
-// but not from main's prior tip (first parent), i.e. exactly what the merge
-// introduced.
+// floor is also raised by a "+semver:" directive in the merge commit's own
+// message, and by any commit the merge brought in that requests a stronger bump
+// (via a "+semver:" directive or by itself being a feature merge). The commits
+// considered are those reachable from the merged tip (second parent) but not
+// from main's prior tip (first parent), i.e. exactly what the merge introduced.
 func (c *calculator) directMergeBump(cm *object.Commit) (bumpKind, error) {
 	floor := bumpPatch
 	if isFeatureMerge(cm) {
 		floor = bumpMinor
 	}
+	// A "+semver:" directive on the merge commit itself can raise the floor,
+	// mirroring how the same directive on a merged-in commit is honored below.
+	floor = max(floor, bumpFromMessage(cm.Message))
 	p0, err := cm.Parent(0)
 	if err != nil {
 		return bumpNone, err

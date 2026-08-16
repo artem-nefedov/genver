@@ -31,8 +31,8 @@ Change "latest" to specific release to pin the version.
 ## Features
 
 - Self-contained statically-linked binary, doesn't rely on other executables
-- Tiny
 - Fast
+- Supports a few extra tricks, like formatting output and creating/pushing tags
 - Works only with the specific flow (see below)
 
 ## Supported flow

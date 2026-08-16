@@ -79,7 +79,7 @@ func TestBranchMismatchErrors(t *testing.T) {
 }
 
 // TestBranchInFormatVar: the resolved branch (from --branch on a detached HEAD)
-// is what ${branch} expands to.
+// is what {{.Branch}} expands to.
 func TestBranchInFormatVar(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -90,12 +90,12 @@ func TestBranchInFormatVar(t *testing.T) {
 	h.commit("f1")
 	h.detachHead()
 
-	out, err := runCapture(t, h, "--branch", "feature/cool", "--format", "${branch}")
+	out, err := runCapture(t, h, "--branch", "feature/cool", "--format", "{{.Branch}}")
 	if err != nil {
-		t.Fatalf("--branch with --format ${branch}: err=%v", err)
+		t.Fatalf("--branch with --format {{.Branch}}: err=%v", err)
 	}
 	if out != "feature/cool" {
-		t.Errorf("${branch} = %q, want %q", out, "feature/cool")
+		t.Errorf("{{.Branch}} = %q, want %q", out, "feature/cool")
 	}
 }
 

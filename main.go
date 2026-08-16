@@ -22,10 +22,9 @@ Flags:
   --help              Show this help and exit.
   --version           Show givi's own version and exit.
   --format <tmpl>     Render the version through a template instead of printing
-                      the full version. The template uses ${var} syntax with the
-                      variables: full, core, major, minor, patch, prerelease,
-                      count, shortsha, longsha, branch. Doesn't affect tag.
-                      Bash parameter expansions are partially supported.
+                      the full version. <tmpl> is a Go template with exposed
+                      fields: .Full, .Core, .Major, .Minor, .Patch, .PreRelease,
+                      .Count, .ShortSHA, .LongSHA, .Branch. Doesn't affect tag.
   --tag-format <tmpl> Same as --format, but also affects tag by --tag-main.
   --write-to <file>   Also write the output (honoring --format) to <file>.
   --branch <name>     Branch name. On a detached HEAD it supplies the branch;
@@ -60,7 +59,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	var (
 		showHelp      = fs.Bool("help", false, "show help")
 		showVersion   = fs.Bool("version", false, "show givi version")
-		formatTmpl    = fs.String("format", "", "render the version through a ${var} template")
+		formatTmpl    = fs.String("format", "", "render the version through a Go template")
 		tagFormatTmpl = fs.String("tag-format", "", "like --format, but also shapes the tag from --tag-main")
 		writeTo       = fs.String("write-to", "", "also write the output to this file (overwriting it)")
 		branchName    = fs.String("branch", "", "branch name to compute for; overrides a detached HEAD, must match a checked-out branch")

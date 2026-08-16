@@ -2,39 +2,56 @@ package main
 
 import (
 	"fmt"
-	"strconv"
 	"strings"
-
-	"github.com/fluxcd/pkg/envsubst"
+	"text/template"
 )
 
-// renderFormat expands a --format template into the final output string. The
-// template uses ${var} syntax (as understood by fluxcd's envsubst) and may
-// reference these variables — and only these; a reference to any other variable
-// fails in strict mode:
+// formatVars is the data passed to a --format / --tag-format Go template. Every
+// exported field is a template variable; referencing anything else is a
+// parse-time error, so a typo like "{{.Prerlease}}" fails rather than expanding
+// to an empty string.
 //
-//	full        the complete version, e.g. "1.2.3-alpha.4" or "1.2.3"
-//	core        the version core without the prerelease tail, e.g. "1.2.3"
-//	prerelease  the prerelease tail including its leading dash, e.g. "-alpha.4",
+//	Full        the complete version, e.g. "1.2.3-alpha.4" or "1.2.3"
+//	Core        the version core without the prerelease tail, e.g. "1.2.3"
+//	PreRelease  the prerelease tail including its leading dash, e.g. "-alpha.4",
 //	            or an empty string on a release version
-//	count       the trailing counter of the prerelease tail (the number after
+//	Count       the trailing counter of the prerelease tail (the number after
 //	            the last dot), e.g. "4", or an empty string on a release version
-//	major       the core's major component, e.g. "1"
-//	minor       the core's minor component, e.g. "2"
-//	patch       the core's patch component, e.g. "3"
-//	branch      the exact name of the branch, e.g. "feature/cool-abc"
-//	shortsha    the abbreviated HEAD commit hash, e.g. "0e6df221"
-//	longsha     the full HEAD commit hash, e.g. "0e6df221..." (40 hex chars)
+//	Major       the core's major component as an integer, e.g. 1
+//	Minor       the core's minor component as an integer, e.g. 2
+//	Patch       the core's patch component as an integer, e.g. 3
+//	Branch      the exact name of the branch, e.g. "feature/cool-abc"
+//	ShortSHA    the abbreviated HEAD commit hash, e.g. "0e6df221"
+//	LongSHA     the full HEAD commit hash, e.g. "0e6df221..." (40 hex chars)
+type formatVars struct {
+	Full       string
+	Core       string
+	PreRelease string
+	Count      string
+	Major      uint64
+	Minor      uint64
+	Patch      uint64
+	Branch     string
+	ShortSHA   string
+	LongSHA    string
+}
+
+// renderFormat expands a --format template into the final output string. The
+// template is a Go text/template referencing the fields of formatVars, e.g.
+// "{{.Core}}{{.PreRelease}}" or "v{{.Full}}". Integer components (Major, Minor,
+// Patch) are passed as integers so template arithmetic and formatting work on
+// them; the rest are strings. Two string helpers are available in templates:
+// trimPrefix and trimSuffix, e.g. {{trimPrefix "-" .PreRelease}} yields the
+// prerelease tail without its leading dash. Their argument order matches
+// Helm/Sprig (prefix/suffix first, then the string).
 //
-// Expansion is strict (envsubst is given a mapping that reports any other name
-// as unset), so a typo like "${prerlease}" is an error rather than a silent
-// empty string.
+// Referencing an unknown field is a parse-time error, so a typo like
+// "{{.Prerlease}}" fails instead of silently rendering nothing.
 func (r result) renderFormat(tmpl string) (string, error) {
 	full, err := r.version()
 	if err != nil {
 		return "", err
 	}
-	core := r.core.String()
 	prerelease := ""
 	count := ""
 	if r.prerelease != "" {
@@ -45,26 +62,36 @@ func (r result) renderFormat(tmpl string) (string, error) {
 			count = r.prerelease[i+1:]
 		}
 	}
-	vars := map[string]string{
-		"full":       full,
-		"core":       core,
-		"prerelease": prerelease,
-		"count":      count,
-		"major":      strconv.FormatUint(r.core.major, 10),
-		"minor":      strconv.FormatUint(r.core.minor, 10),
-		"patch":      strconv.FormatUint(r.core.patch, 10),
-		"branch":     r.branch,
-		"shortsha":   short(r.headHash),
-		"longsha":    r.headHash.String(),
+	data := formatVars{
+		Full:       full,
+		Core:       r.core.String(),
+		PreRelease: prerelease,
+		Count:      count,
+		Major:      r.core.major,
+		Minor:      r.core.minor,
+		Patch:      r.core.patch,
+		Branch:     r.branch,
+		ShortSHA:   short(r.headHash),
+		LongSHA:    r.headHash.String(),
 	}
-	// Strict mapping: only the known variables resolve; anything else reports
-	// exists=false so envsubst fails instead of substituting an empty string.
-	out, err := envsubst.Eval(tmpl, func(name string) (string, bool) {
-		v, ok := vars[name]
-		return v, ok
-	})
+
+	// Option("missingkey=error") turns a reference to an absent field into an
+	// error rather than an empty/"<no value>" render. A small set of string
+	// helpers is registered so templates can, e.g., strip PreRelease's leading
+	// dash with {{trimPrefix "-" .PreRelease}}. The argument order matches
+	// Helm/Sprig (prefix/suffix first, then the string), which is the reverse of
+	// the strings package.
+	funcs := template.FuncMap{
+		"trimPrefix": func(prefix, s string) string { return strings.TrimPrefix(s, prefix) },
+		"trimSuffix": func(suffix, s string) string { return strings.TrimSuffix(s, suffix) },
+	}
+	t, err := template.New("format").Funcs(funcs).Option("missingkey=error").Parse(tmpl)
 	if err != nil {
+		return "", fmt.Errorf("parse --format %q: %w", tmpl, err)
+	}
+	var buf strings.Builder
+	if err := t.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("expand --format %q: %w", tmpl, err)
 	}
-	return out, nil
+	return buf.String(), nil
 }

@@ -26,7 +26,7 @@ func TestTagFormatOnly(t *testing.T) {
 	h := newHarness(t)
 	head := h.commit("root") // main = 0.1.0
 
-	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v${full}")
+	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}")
 	if err != nil || out != "v0.1.0" {
 		t.Fatalf("--tag-format only: out=%q err=%v, want stdout %q", out, err, "v0.1.0")
 	}
@@ -48,7 +48,7 @@ func TestFormatOnlyLeavesTagUnshaped(t *testing.T) {
 	h := newHarness(t)
 	head := h.commit("root") // main = 0.1.0
 
-	out, err := runCapture(t, h, "--tag-main", "--format", "v${full}")
+	out, err := runCapture(t, h, "--tag-main", "--format", "v{{.Full}}")
 	if err != nil || out != "v0.1.0" {
 		t.Fatalf("--format only: out=%q err=%v, want stdout %q", out, err, "v0.1.0")
 	}
@@ -71,8 +71,8 @@ func TestFormatAndTagFormat(t *testing.T) {
 
 	out, err := runCapture(t, h,
 		"--tag-main",
-		"--format", "out-${full}",
-		"--tag-format", "tag-${full}",
+		"--format", "out-{{.Full}}",
+		"--tag-format", "tag-{{.Full}}",
 		"--write-to", "version.txt",
 	)
 	if err != nil || out != "out-0.1.0" {
@@ -100,7 +100,7 @@ func TestTagFormatWriteTo(t *testing.T) {
 	h := newHarness(t)
 	h.commit("root") // main = 0.1.0
 
-	out, err := runCapture(t, h, "--tag-format", "v${full}", "--write-to", "version.txt")
+	out, err := runCapture(t, h, "--tag-format", "v{{.Full}}", "--write-to", "version.txt")
 	if err != nil || out != "v0.1.0" {
 		t.Fatalf("--tag-format --write-to: out=%q err=%v", out, err)
 	}
@@ -123,7 +123,7 @@ func TestTagFormatPushTagTo(t *testing.T) {
 		t.Fatalf("create remote: %v", err)
 	}
 
-	out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin", "--tag-format", "v${full}")
+	out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin", "--tag-format", "v{{.Full}}")
 	if err != nil || out != "v0.1.0" {
 		t.Fatalf("--tag-format --push-tag-to: out=%q err=%v", out, err)
 	}
@@ -146,7 +146,7 @@ func TestTagFormatIgnoredOnNonMain(t *testing.T) {
 	h.newBranch("develop")
 	h.commit("d1")
 
-	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v${full}")
+	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}")
 	if err != nil {
 		t.Fatalf("--tag-format on develop: out=%q err=%v", out, err)
 	}

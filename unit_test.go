@@ -1645,16 +1645,16 @@ func TestFormat(t *testing.T) {
 		h.commit("d2")
 
 		cases := map[string]string{
-			"${full}":                        "0.1.1-alpha.2",
-			"${core}":                        "0.1.1",
-			"${prerelease}":                  "-alpha.2",
-			"${count}":                       "2",
-			"${major}.${minor}.${patch}":     "0.1.1",
-			"${core}${prerelease}":           "0.1.1-alpha.2",
-			"v${core}":                       "v0.1.1",
-			"major=${major} minor=${minor}":  "major=0 minor=1",
-			"image:${core}${prerelease}-dbg": "image:0.1.1-alpha.2-dbg",
-			"build.${count}":                 "build.2",
+			"{{.Full}}":                          "0.1.1-alpha.2",
+			"{{.Core}}":                          "0.1.1",
+			"{{.PreRelease}}":                    "-alpha.2",
+			"{{.Count}}":                         "2",
+			"{{.Major}}.{{.Minor}}.{{.Patch}}":   "0.1.1",
+			"{{.Core}}{{.PreRelease}}":           "0.1.1-alpha.2",
+			"v{{.Core}}":                         "v0.1.1",
+			"major={{.Major}} minor={{.Minor}}":  "major=0 minor=1",
+			"image:{{.Core}}{{.PreRelease}}-dbg": "image:0.1.1-alpha.2-dbg",
+			"build.{{.Count}}":                   "build.2",
 		}
 		for tmpl, want := range cases {
 			out, err := runCapture(t, h, "--format", tmpl)
@@ -1676,10 +1676,10 @@ func TestFormat(t *testing.T) {
 		h.commit("f2")
 		h.commit("f3")
 
-		if out, err := runCapture(t, h, "--format", "${prerelease}"); err != nil || out != "-cool-abc.3" {
+		if out, err := runCapture(t, h, "--format", "{{.PreRelease}}"); err != nil || out != "-cool-abc.3" {
 			t.Errorf("prerelease on feature: out=%q err=%v", out, err)
 		}
-		if out, err := runCapture(t, h, "--format", "${count}"); err != nil || out != "3" {
+		if out, err := runCapture(t, h, "--format", "{{.Count}}"); err != nil || out != "3" {
 			t.Errorf("count on feature: out=%q err=%v", out, err)
 		}
 	})
@@ -1692,24 +1692,24 @@ func TestFormat(t *testing.T) {
 		h.commit("root")
 
 		// main
-		if out, err := runCapture(t, h, "--format", "${branch}"); err != nil || out != "main" {
+		if out, err := runCapture(t, h, "--format", "{{.Branch}}"); err != nil || out != "main" {
 			t.Errorf("branch on main: out=%q err=%v", out, err)
 		}
 
 		// develop
 		h.newBranch("develop")
-		if out, err := runCapture(t, h, "--format", "${branch}"); err != nil || out != "develop" {
+		if out, err := runCapture(t, h, "--format", "{{.Branch}}"); err != nil || out != "develop" {
 			t.Errorf("branch on develop: out=%q err=%v", out, err)
 		}
 
 		// feature branch: the exact "feature/cool-abc", not the sanitized label.
 		h.newBranch("feature/cool-abc")
 		h.commit("f1")
-		if out, err := runCapture(t, h, "--format", "${branch}"); err != nil || out != "feature/cool-abc" {
+		if out, err := runCapture(t, h, "--format", "{{.Branch}}"); err != nil || out != "feature/cool-abc" {
 			t.Errorf("branch on feature: out=%q err=%v", out, err)
 		}
 		// Combined with the version, as one might tag an image.
-		if out, err := runCapture(t, h, "--format", "${branch}@${full}"); err != nil || out != "feature/cool-abc@0.2.0-cool-abc.1" {
+		if out, err := runCapture(t, h, "--format", "{{.Branch}}@{{.Full}}"); err != nil || out != "feature/cool-abc@0.2.0-cool-abc.1" {
 			t.Errorf("branch+full: out=%q err=%v", out, err)
 		}
 	})
@@ -1725,14 +1725,14 @@ func TestFormat(t *testing.T) {
 		head := h.commit("d1")
 		want := head.String()
 
-		if out, err := runCapture(t, h, "--format", "${longsha}"); err != nil || out != want {
+		if out, err := runCapture(t, h, "--format", "{{.LongSHA}}"); err != nil || out != want {
 			t.Errorf("longsha: out=%q err=%v, want %q", out, err, want)
 		}
-		if out, err := runCapture(t, h, "--format", "${shortsha}"); err != nil || out != want[:8] {
+		if out, err := runCapture(t, h, "--format", "{{.ShortSHA}}"); err != nil || out != want[:8] {
 			t.Errorf("shortsha: out=%q err=%v, want %q", out, err, want[:8])
 		}
 		// A realistic image tag combining version and short sha.
-		if out, err := runCapture(t, h, "--format", "${core}-${shortsha}"); err != nil || out != "0.1.1-"+want[:8] {
+		if out, err := runCapture(t, h, "--format", "{{.Core}}-{{.ShortSHA}}"); err != nil || out != "0.1.1-"+want[:8] {
 			t.Errorf("core+shortsha: out=%q err=%v, want %q", out, err, "0.1.1-"+want[:8])
 		}
 	})
@@ -1743,19 +1743,19 @@ func TestFormat(t *testing.T) {
 		h := newHarness(t)
 		h.commit("root") // main = 0.1.0
 
-		if out, err := runCapture(t, h, "--format", "${full}"); err != nil || out != "0.1.0" {
+		if out, err := runCapture(t, h, "--format", "{{.Full}}"); err != nil || out != "0.1.0" {
 			t.Errorf("full on main: out=%q err=%v", out, err)
 		}
 		// The prerelease tail is empty on a release, so core and full match and a
-		// bare ${prerelease} renders nothing.
-		if out, err := runCapture(t, h, "--format", "${core}${prerelease}"); err != nil || out != "0.1.0" {
+		// bare {{.PreRelease}} renders nothing.
+		if out, err := runCapture(t, h, "--format", "{{.Core}}{{.PreRelease}}"); err != nil || out != "0.1.0" {
 			t.Errorf("core+prerelease on release: out=%q err=%v", out, err)
 		}
-		if out, err := runCapture(t, h, "--format", "x${prerelease}y"); err != nil || out != "xy" {
+		if out, err := runCapture(t, h, "--format", "x{{.PreRelease}}y"); err != nil || out != "xy" {
 			t.Errorf("empty prerelease: out=%q err=%v", out, err)
 		}
 		// The count is likewise empty on a release version.
-		if out, err := runCapture(t, h, "--format", "x${count}y"); err != nil || out != "xy" {
+		if out, err := runCapture(t, h, "--format", "x{{.Count}}y"); err != nil || out != "xy" {
 			t.Errorf("empty count on release: out=%q err=%v", out, err)
 		}
 	})
@@ -1768,20 +1768,20 @@ func TestFormat(t *testing.T) {
 		h.newBranch("develop")
 		h.commit("d1")
 
-		sep, err := runCapture(t, h, "--format", "${core}")
+		sep, err := runCapture(t, h, "--format", "{{.Core}}")
 		if err != nil || sep != "0.1.1" {
 			t.Errorf("--format arg: out=%q err=%v", sep, err)
 		}
-		eq, err := runCapture(t, h, "--format=${core}")
+		eq, err := runCapture(t, h, "--format={{.Core}}")
 		if err != nil || eq != "0.1.1" {
 			t.Errorf("--format=arg: out=%q err=%v", eq, err)
 		}
 	})
 
-	// The envsubst library's bash-style parameter expansion operators work on
-	// our variables — e.g. ${prerelease#-} strips the leading dash. This is the
-	// idiomatic way to get the prerelease tail without its dash.
-	t.Run("ParameterExpansion", func(t *testing.T) {
+	// Go template features work on our variables: pipelines, built-in functions
+	// like printf, and — because Major/Minor/Patch are integers, not strings —
+	// integer arithmetic and numeric formatting.
+	t.Run("TemplateFeatures", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.commit("root")
@@ -1790,18 +1790,38 @@ func TestFormat(t *testing.T) {
 		h.commit("d2") // develop = 0.1.1-alpha.2
 
 		cases := map[string]string{
-			"${prerelease#-}":   "alpha.2", // strip the leading dash
-			"${prerelease##*.}": "2",       // everything after the last dot
-			"${prerelease#*.}":  "2",       // everything after the first dot
-			"${full%-*}":        "0.1.1",   // drop the trailing "-<tail>"
-			"${full/-/+}":       "0.1.1+alpha.2",
-			"${core//./_}":      "0_1_1", // replace all dots
+			`{{.Core}}`:                                "0.1.1",
+			`{{printf "%s+%s" .Core .Count}}`:          "0.1.1+2",
+			`{{printf "%02d" .Minor}}`:                 "01", // numeric formatting: Minor is an int
+			`{{printf "%d" .Patch}}`:                   "1",  // Patch is an int
+			`{{if .PreRelease}}pre{{else}}rel{{end}}`:  "pre",
+			`{{trimPrefix "-" .PreRelease}}`:           "alpha.2", // strip the leading dash
+			`{{.Core}}+{{trimPrefix "-" .PreRelease}}`: "0.1.1+alpha.2",
 		}
 		for tmpl, want := range cases {
 			out, err := runCapture(t, h, "--format", tmpl)
 			if err != nil || out != want {
 				t.Errorf("--format %q: out=%q err=%v, want %q", tmpl, out, err, want)
 			}
+		}
+	})
+
+	// The integer variables (Major, Minor, Patch) are passed as integers, so
+	// template arithmetic on them works without any string parsing.
+	t.Run("IntegerArithmetic", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1") // develop = 0.1.1-alpha.1, core minor=1 patch=1
+
+		// The Go template "add" isn't built in, but printf with a computed width
+		// and comparison operators (eq/lt) treat these as numbers, not strings.
+		if out, err := runCapture(t, h, "--format", `{{if eq .Minor 1}}minor-is-one{{end}}`); err != nil || out != "minor-is-one" {
+			t.Errorf("eq on int Minor: out=%q err=%v", out, err)
+		}
+		if out, err := runCapture(t, h, "--format", `{{if lt .Major 5}}small{{end}}`); err != nil || out != "small" {
+			t.Errorf("lt on int Major: out=%q err=%v", out, err)
 		}
 	})
 
@@ -1814,11 +1834,11 @@ func TestFormat(t *testing.T) {
 		h.newBranch("develop")
 		h.commit("d1")
 
-		if out, err := runCapture(t, h, "--format", "${nope}"); err == nil {
+		if out, err := runCapture(t, h, "--format", "{{.Nope}}"); err == nil {
 			t.Errorf("unknown variable should error, got out=%q", out)
 		}
 		// A typo of a real variable must also fail rather than expand to "".
-		if out, err := runCapture(t, h, "--format", "${prerlease}"); err == nil {
+		if out, err := runCapture(t, h, "--format", "{{.Prerlease}}"); err == nil {
 			t.Errorf("typo'd variable should error, got out=%q", out)
 		}
 	})

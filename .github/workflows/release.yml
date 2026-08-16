@@ -85,7 +85,3 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Force GoReleaser to use givi's already-computed version (the tag givi
-          # created above) instead of its own git-derived guess. CGO is disabled
-          # per-build in .goreleaser.yaml, so it need not be set here.
-          COMPUTED_VERSION: ${{ steps.version.outputs.version }}

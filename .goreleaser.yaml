@@ -1,19 +1,6 @@
-# GoReleaser configuration.
-#
-# The release version is computed by givi itself and injected via the
-# COMPUTED_VERSION environment variable (see the release workflow); the
-# version GoReleaser would otherwise derive from `git describe` is ignored. All
-# binaries are compiled with CGO disabled.
 version: 2
 
 project_name: givi
-
-# In snapshot mode (used by `make release-preview`) GoReleaser ignores
-# COMPUTED_VERSION and would otherwise stamp a "0.0.0-SNAPSHOT" version.
-# Since givi passes its own computed version in that env var, reuse it here so
-# the preview binary reports the real version.
-snapshot:
-  version_template: "{{ .Env.COMPUTED_VERSION }}"
 
 before:
   hooks:
@@ -28,7 +15,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      # {{ .Version }} resolves to COMPUTED_VERSION without "v" prefix.
+      # The release version is computed by givi itself.
       - -s -w -X main.version=v{{ .Version }}
     goos:
       - linux
@@ -56,9 +43,8 @@ checksum:
   name_template: checksums.txt
 
 # Multi-arch image builds. GoReleaser drops the matching prebuilt binary into
-# the build context, so the Dockerfiles only COPY it in (no in-image
-# compilation). dockers_v2 builds both architectures and the multi-arch manifest
-# in one entry. Two flavours are produced: a scratch image and an Alpine image.
+# the build context, so the Dockerfiles only COPY it in (no in-image compilation).
+# Two flavours are produced: a scratch image and an Alpine image.
 dockers_v2:
   # --- scratch (minimal) ---
   - id: scratch
@@ -100,8 +86,3 @@ release:
 changelog:
   use: github
   sort: asc
-  filters:
-    exclude:
-      - "^docs:"
-      - "^test:"
-      - "^chore:"

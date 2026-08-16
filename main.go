@@ -81,7 +81,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	}
 
 	if fs.NArg() > 0 {
-		fmt.Fprint(out, usage + "\n")
+		fmt.Fprint(out, usage+"\n")
 		return fmt.Errorf("unexpected positional argument: %q", fs.Arg(0))
 	}
 

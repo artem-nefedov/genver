@@ -1,7 +1,7 @@
 # GoReleaser configuration.
 #
 # The release version is computed by givi itself and injected via the
-# GORELEASER_CURRENT_TAG environment variable (see the release workflow); the
+# COMPUTED_VERSION environment variable (see the release workflow); the
 # version GoReleaser would otherwise derive from `git describe` is ignored. All
 # binaries are compiled with CGO disabled.
 version: 2
@@ -9,11 +9,11 @@ version: 2
 project_name: givi
 
 # In snapshot mode (used by `make release-preview`) GoReleaser ignores
-# GORELEASER_CURRENT_TAG and would otherwise stamp a "0.0.0-SNAPSHOT" version.
+# COMPUTED_VERSION and would otherwise stamp a "0.0.0-SNAPSHOT" version.
 # Since givi passes its own computed version in that env var, reuse it here so
 # the preview binary reports the real version.
 snapshot:
-  version_template: "{{ .Env.GORELEASER_CURRENT_TAG }}"
+  version_template: "{{ .Env.COMPUTED_VERSION }}"
 
 before:
   hooks:
@@ -28,7 +28,7 @@ builds:
     flags:
       - -trimpath
     ldflags:
-      # {{ .Version }} resolves to GORELEASER_CURRENT_TAG (givi's own version).
+      # {{ .Version }} resolves to COMPUTED_VERSION (givi's own version).
       - -s -w -X main.version={{ .Version }}
     goos:
       - linux

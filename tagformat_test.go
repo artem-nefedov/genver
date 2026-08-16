@@ -19,19 +19,19 @@ func localTagHash(t *testing.T, h *harness, tag string) plumbing.Hash {
 	return ref.Hash()
 }
 
-// TestTagFormatOnly: with only --tag-format, it shapes stdout exactly like
-// --format AND shapes the tag created by --tag-main.
+// TestTagFormatOnly: with only --tag-format, it shapes the tag created by
+// --tag-main but leaves stdout as the full computed version.
 func TestTagFormatOnly(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	head := h.commit("root") // main = 0.1.0
 
 	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}")
-	if err != nil || out != "v0.1.0" {
-		t.Fatalf("--tag-format only: out=%q err=%v, want stdout %q", out, err, "v0.1.0")
+	if err != nil || out != "0.1.0" {
+		t.Fatalf("--tag-format only: out=%q err=%v, want stdout %q", out, err, "0.1.0")
 	}
 
-	// The tag must use the --tag-format template too.
+	// The tag must use the --tag-format template.
 	if got := localTagHash(t, h, "v0.1.0"); got != head {
 		t.Errorf("tag v0.1.0 points at %s, want HEAD %s", got, head)
 	}
@@ -93,19 +93,19 @@ func TestFormatAndTagFormat(t *testing.T) {
 	}
 }
 
-// TestTagFormatWriteTo: with only --tag-format, --write-to gets the same shaped
-// output as stdout.
+// TestTagFormatWriteTo: --tag-format never affects --write-to; the file gets
+// the full computed version, not the tag-shaped one.
 func TestTagFormatWriteTo(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.commit("root") // main = 0.1.0
 
 	out, err := runCapture(t, h, "--tag-format", "v{{.Full}}", "--write-to", "version.txt")
-	if err != nil || out != "v0.1.0" {
+	if err != nil || out != "0.1.0" {
 		t.Fatalf("--tag-format --write-to: out=%q err=%v", out, err)
 	}
-	if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "v0.1.0" {
-		t.Errorf("write-to content = %q, want %q", got, "v0.1.0")
+	if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "0.1.0" {
+		t.Errorf("write-to content = %q, want %q", got, "0.1.0")
 	}
 }
 
@@ -124,7 +124,7 @@ func TestTagFormatPushTagTo(t *testing.T) {
 	}
 
 	out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin", "--tag-format", "v{{.Full}}")
-	if err != nil || out != "v0.1.0" {
+	if err != nil || out != "0.1.0" {
 		t.Fatalf("--tag-format --push-tag-to: out=%q err=%v", out, err)
 	}
 
@@ -137,8 +137,8 @@ func TestTagFormatPushTagTo(t *testing.T) {
 	}
 }
 
-// TestTagFormatIgnoredOnNonMain: --tag-format shapes stdout regardless of
-// branch, but no tag is made off main.
+// TestTagFormatIgnoredOnNonMain: --tag-format never shapes stdout, and no tag
+// is made off main.
 func TestTagFormatIgnoredOnNonMain(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -150,8 +150,8 @@ func TestTagFormatIgnoredOnNonMain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("--tag-format on develop: out=%q err=%v", out, err)
 	}
-	if !strings.HasPrefix(out, "v") {
-		t.Errorf("stdout %q should still be shaped by --tag-format on a non-main branch", out)
+	if strings.HasPrefix(out, "v") {
+		t.Errorf("stdout %q should not be shaped by --tag-format", out)
 	}
 	// No tag should have been created off main.
 	iter, err := h.g.r.Tags()

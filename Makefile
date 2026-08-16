@@ -26,4 +26,4 @@ clean:
 ## via GoReleaser, without publishing anything (no git tag, no GitHub release, no
 ## image push). Output lands in dist/. Uses givi's own computed version.
 release-preview:
-	GORELEASER_CURRENT_TAG=$(VERSION) goreleaser build --clean --snapshot --single-target
+	COMPUTED_VERSION=$(VERSION) goreleaser build --clean --snapshot --single-target

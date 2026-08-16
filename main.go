@@ -27,7 +27,7 @@ Flags:
                       fields: .Full, .Core, .Major, .Minor, .Patch, .PreRelease,
                       .Count, .HeadHash, .Branch. Allows usage of Sprig functions
                       (only hermetic by default). Doesn't affect tag.
-  --tag-format <tmpl> Same as --format, but also affects tag by --tag-main.
+  --tag-format <tmpl> Like --format, but only affects the tag by --tag-main.
   --write-to <tmpl>   Also write the output (honoring --format) to one or more
                       files. The argument is a Go template like --format. Every
                       non-blank line produced is a file path (whitespace trimmed).
@@ -66,7 +66,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		showHelp      = fs.Bool("help", false, "show help")
 		showVersion   = fs.Bool("version", false, "show givi version")
 		formatTmpl    = fs.String("format", "", "render the version through a Go template")
-		tagFormatTmpl = fs.String("tag-format", "", "like --format, but also shapes the tag from --tag-main")
+		tagFormatTmpl = fs.String("tag-format", "", "like --format, but only shapes the tag from --tag-main")
 		writeTo       = fs.String("write-to", "", "also write the output to the file(s) named by this template, one per non-blank line")
 		allowNonHerm  = fs.Bool("allow-nonhermetic", false, "expose all Sprig template functions, including non-repeatable ones (env, now, uuidv4, ...)")
 		branchName    = fs.String("branch", "", "branch name to compute for; overrides a detached HEAD, must match a checked-out branch")
@@ -176,17 +176,9 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		}
 	}
 
-	// A --format template reshapes the printed output (and --write-to); the
-	// default is the full version. When only --tag-format is given it stands in
-	// for --format here too, so a lone --tag-format shapes stdout as well as the
-	// tag. When both are given, --format wins for the printed output.
-	stdoutTmpl := *formatTmpl
-	if stdoutTmpl == "" {
-		stdoutTmpl = *tagFormatTmpl
-	}
 	outText := v
-	if stdoutTmpl != "" {
-		outText, err = res.renderFormat(stdoutTmpl, *allowNonHerm)
+	if *formatTmpl != "" {
+		outText, err = res.renderFormat(*formatTmpl, *allowNonHerm)
 		if err != nil {
 			return err
 		}

@@ -1,8 +1,6 @@
 name: Release
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -43,7 +41,7 @@ jobs:
       # HEAD (--tag-main), pushes ONLY that tag to origin (--push-tag-to), and
       # prints the computed version on stdout, which we capture. The version is
       # therefore calculated exactly once. Both --tag-main and --push-tag-to are
-      # idempotent, so re-running on main does not fail.
+      # idempotent, so re-running the workflow does not fail.
       #
       # The token is embedded in the push URL because go-git authenticates from
       # the URL's userinfo (it does not read the http.extraheader credential
@@ -60,7 +58,7 @@ jobs:
           echo "Computed release version: ${VERSION}"
 
       # Skip GoReleaser when a GitHub release for this version already exists, so
-      # re-runs on main are no-ops. Checking the release (not just the tag) also
+      # re-runs are no-ops. Checking the release (not just the tag) also
       # recovers from a partial run where the tag was pushed but the release was
       # never created.
       - name: Check whether this version is already released

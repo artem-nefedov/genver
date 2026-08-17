@@ -280,6 +280,63 @@ func TestPushTagToEqualsSyntax(t *testing.T) {
 	}
 }
 
+// TestPushTagAlreadyUpToDate pushes the same tag twice: the second push finds
+// the remote already has the tag and go-git returns its "already up-to-date"
+// sentinel, which normalizePushErr folds into success. genver must report no
+// error and the remote tag must still mark HEAD.
+func TestPushTagAlreadyUpToDate(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	head := h.commit("root")
+	url, st := newMemRemote(t)
+
+	if _, err := h.g.r.CreateRemote(&config.RemoteConfig{
+		Name: "origin",
+		URLs: []string{url},
+	}); err != nil {
+		t.Fatalf("create remote: %v", err)
+	}
+
+	// First push seeds the remote with the tag.
+	if out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin"); err != nil || out != "0.1.0" {
+		t.Fatalf("first push: out=%q err=%v", out, err)
+	}
+	// Second push: the remote already has the tag -> NoErrAlreadyUpToDate, which
+	// must be folded into success.
+	out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin")
+	if err != nil || out != "0.1.0" {
+		t.Fatalf("second (already-up-to-date) push: out=%q err=%v", out, err)
+	}
+	if got := memTagHash(t, st, "0.1.0"); got != head {
+		t.Errorf("tag 0.1.0 on remote points at %s, want HEAD %s", got, head)
+	}
+}
+
+// TestLooksLikeURL pins the classification of a --push-tag-to argument as either
+// a remote URL/path (pushed to directly via an anonymous remote) or a bare
+// remote name (looked up in the repo config). It mirrors TestRedactURL's style.
+func TestLooksLikeURL(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"https://github.com/o/r.git": true,  // scheme
+		"ssh://git@host/o/r.git":     true,  // scheme
+		"git://host/o/r.git":         true,  // scheme
+		"file:///tmp/r.git":          true,  // scheme
+		"/abs/path/repo.git":         true,  // absolute path
+		"./rel/path/repo.git":        true,  // relative path
+		"../up/repo.git":             true,  // relative path
+		"git@github.com:o/r.git":     true,  // scp-like (has "@" and ":")
+		"origin":                     false, // bare remote name
+		"upstream":                   false, // bare remote name
+		"my-remote":                  false, // bare remote name
+	}
+	for in, want := range cases {
+		if got := looksLikeURL(in); got != want {
+			t.Errorf("looksLikeURL(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 // TestRedactURL checks that credentials embedded in a push URL are stripped for
 // logs/errors, while non-URL remotes and credential-free URLs pass through
 // unchanged.

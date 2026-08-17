@@ -14,6 +14,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
+	"github.com/go-git/go-git/v5/plumbing/format/index"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
@@ -111,6 +112,17 @@ func (h *harness) commit(msg string) plumbing.Hash {
 	return hash
 }
 
+// commits makes n direct commits on the current branch, each with a unique
+// message, returning the hash of the last one.
+func (h *harness) commits(n int) plumbing.Hash {
+	h.t.Helper()
+	var last plumbing.Hash
+	for range n {
+		last = h.commit(fmt.Sprintf("commit %d", h.n+1))
+	}
+	return last
+}
+
 // checkout switches to an existing branch.
 func (h *harness) checkout(branch string) {
 	h.t.Helper()
@@ -142,6 +154,31 @@ func (h *harness) newBranch(branch string) {
 	})
 	if err != nil {
 		h.t.Fatalf("new branch %q: %v", branch, err)
+	}
+}
+
+// orphanBranch creates and switches to a new branch with no parent history: an
+// unborn branch whose first commit becomes an independent root, sharing no
+// common ancestor with any existing branch. This lets tests build unrelated
+// histories (e.g. a develop line that does not descend from main). The caller
+// must make the first commit on the returned branch (via commit) to give it a
+// root; until then the branch has no commits.
+func (h *harness) orphanBranch(branch string) {
+	h.t.Helper()
+	// Point HEAD at a brand-new, unborn branch ref. go-git's worktree commit
+	// with no resolvable HEAD parent produces a rootless commit.
+	if err := h.g.r.Storer.SetReference(
+		plumbing.NewSymbolicReference(plumbing.HEAD, plumbing.NewBranchReferenceName(branch)),
+	); err != nil {
+		h.t.Fatalf("orphan branch %q: %v", branch, err)
+	}
+	// Clear the worktree so the orphan root does not inherit the previous
+	// branch's tree; a fresh in-memory filesystem gives it an empty starting
+	// tree, and an empty index drops the previous branch's staged entries (so a
+	// later Checkout does not see phantom "unstaged changes").
+	h.wt.Filesystem = memfs.New()
+	if err := h.g.r.Storer.SetIndex(&index.Index{Version: 2}); err != nil {
+		h.t.Fatalf("orphan branch %q: reset index: %v", branch, err)
 	}
 }
 
@@ -198,6 +235,63 @@ func (h *harness) mergeMsg(from, msg string) plumbing.Hash {
 		h.t.Fatalf("merge %q: %v", from, err)
 	}
 	// Point the current branch ref at the new merge commit and restore HEAD.
+	branchName := head.Name()
+	if err := h.g.r.Storer.SetReference(plumbing.NewHashReference(branchName, hash)); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.g.r.Storer.SetReference(plumbing.NewSymbolicReference(plumbing.HEAD, branchName)); err != nil {
+		h.t.Fatal(err)
+	}
+	if err := h.wt.Checkout(&git.CheckoutOptions{Branch: branchName, Force: true}); err != nil {
+		h.t.Fatal(err)
+	}
+	return hash
+}
+
+// octopusMerge performs a non-fast-forward octopus merge, creating a single
+// merge commit whose parents are [currentHEAD, from[0], from[1], ...]. It
+// generalizes mergeMsg to 3+ parents so octopus topologies (merging several
+// branches at once) can be exercised. The resulting commit's tree matches the
+// first merged branch's tip. At least one `from` branch is required; with a
+// single `from` the behavior matches mergeMsg's default merge message.
+func (h *harness) octopusMerge(msg string, from ...string) plumbing.Hash {
+	h.t.Helper()
+	if len(from) == 0 {
+		h.t.Fatal("octopusMerge requires at least one branch to merge")
+	}
+	head, err := h.g.r.Head()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	parents := []plumbing.Hash{head.Hash()}
+	var firstCommit *object.Commit
+	for _, br := range from {
+		ref, rerr := h.g.r.Reference(plumbing.NewBranchReferenceName(br), true)
+		if rerr != nil {
+			h.t.Fatal(rerr)
+		}
+		commit, cerr := h.g.r.CommitObject(ref.Hash())
+		if cerr != nil {
+			h.t.Fatal(cerr)
+		}
+		if firstCommit == nil {
+			firstCommit = commit
+		}
+		parents = append(parents, commit.Hash)
+	}
+	// Check out the first merged branch's tree so the merge commit's tree
+	// matches it, then commit with all parents.
+	if err := h.wt.Checkout(&git.CheckoutOptions{Hash: firstCommit.Hash, Force: true}); err != nil {
+		h.t.Fatal(err)
+	}
+	hash, err := h.wt.Commit(msg, &git.CommitOptions{
+		Author:            h.sig(),
+		Parents:           parents,
+		AllowEmptyCommits: true,
+	})
+	if err != nil {
+		h.t.Fatalf("octopus merge %v: %v", from, err)
+	}
 	branchName := head.Name()
 	if err := h.g.r.Storer.SetReference(plumbing.NewHashReference(branchName, hash)); err != nil {
 		h.t.Fatal(err)
@@ -308,4 +402,42 @@ func runCaptureAll(t *testing.T, h *harness, args ...string) (string, string, er
 	var stdout, stderr bytes.Buffer
 	rerr := runWithRepo(h.g, args, &stdout, &stderr)
 	return strings.TrimSpace(stdout.String()), strings.TrimSpace(stderr.String()), rerr
+}
+
+// mustHead returns the current HEAD commit hash, failing the test on error.
+func mustHead(t testing.TB, h *harness) plumbing.Hash {
+	t.Helper()
+	head, err := h.g.headCommit()
+	if err != nil {
+		t.Fatalf("headCommit: %v", err)
+	}
+	return head.Hash
+}
+
+// localTagHash returns the hash the named tag points at in the harness's
+// repository, or the zero hash if the tag does not exist.
+func localTagHash(t *testing.T, h *harness, tag string) plumbing.Hash {
+	t.Helper()
+	ref, err := h.g.r.Reference(plumbing.NewTagReferenceName(tag), false)
+	if err != nil {
+		return plumbing.ZeroHash
+	}
+	return ref.Hash()
+}
+
+// writeToFileCount returns how many regular files --write-to persisted directly
+// in dir (subdirectories are counted as one entry, not recursed).
+func writeToFileCount(t *testing.T, h *harness, dir string) int {
+	t.Helper()
+	entries, err := h.wfs.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir %q: %v", dir, err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			n++
+		}
+	}
+	return n
 }

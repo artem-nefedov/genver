@@ -114,7 +114,19 @@ func (g *repo) headBranch() (string, error) {
 //     branch-classified when no branch is checked out, e.g. after a CI checkout
 //     that leaves HEAD detached at a SHA).
 //   - Detached HEAD, no override: an error, as before.
+//
+// A non-empty override is first validated against git's branch-name rules
+// (git-check-ref-format); an invalid name is rejected before any of the above.
 func (g *repo) resolveBranch(override string) (string, error) {
+	// A non-empty override must be a valid git branch name; fail early on
+	// characters git forbids (spaces, ~ ^ : ?, control chars, "..", etc.) rather
+	// than carrying a malformed name into classification and version output. An
+	// empty override means "no override" and is handled below.
+	if override != "" {
+		if err := plumbing.NewBranchReferenceName(override).Validate(); err != nil {
+			return "", fmt.Errorf("invalid --branch name %q: %w", override, err)
+		}
+	}
 	h, err := g.r.Head()
 	if err != nil {
 		return "", fmt.Errorf("resolve HEAD: %w", err)

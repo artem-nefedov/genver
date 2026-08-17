@@ -8,7 +8,7 @@ import (
 )
 
 // TestBranchOverridesDetachedHead: on a detached HEAD, --branch supplies the
-// branch name so givi can classify and compute the version.
+// branch name so genver can classify and compute the version.
 func TestBranchOverridesDetachedHead(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -22,7 +22,7 @@ func TestBranchOverridesDetachedHead(t *testing.T) {
 		t.Errorf("unexpected error: %v", err)
 	}
 
-	// With --branch main, givi computes main's version.
+	// With --branch main, genver computes main's version.
 	out, err := runCapture(t, h, "--branch", "main")
 	if err != nil || out != "0.1.0" {
 		t.Fatalf("--branch main on detached HEAD: out=%q err=%v", out, err)

@@ -1,21 +1,21 @@
 version: 2
 
-project_name: givi
+project_name: genver
 
 before:
   hooks:
     - go mod tidy
 
 builds:
-  - id: givi
+  - id: genver
     main: .
-    binary: givi
+    binary: genver
     env:
       - CGO_ENABLED=0
     flags:
       - -trimpath
     ldflags:
-      # The release version is computed by givi itself.
+      # The release version is computed by genver itself.
       - -s -w -X main.version=v{{ .Version }}
     goos:
       - linux
@@ -26,9 +26,9 @@ builds:
       - arm64
 
 archives:
-  - id: givi
+  - id: genver
     ids:
-      - givi
+      - genver
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_
       {{- if eq .Os "darwin" }}macos{{- else }}{{ .Os }}{{ end }}_{{ .Arch }}
@@ -50,7 +50,7 @@ dockers_v2:
   - id: scratch
     dockerfile: Dockerfile
     images:
-      - ghcr.io/artem-nefedov/givi
+      - ghcr.io/artem-nefedov/genver
     tags:
       - "{{ .Version }}"
       - latest
@@ -60,13 +60,13 @@ dockers_v2:
     labels:
       org.opencontainers.image.title: "{{ .ProjectName }}"
       org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.source: "https://github.com/artem-nefedov/givi"
+      org.opencontainers.image.source: "https://github.com/artem-nefedov/genver"
 
   # --- Alpine ---
   - id: alpine
     dockerfile: Dockerfile.alpine
     images:
-      - ghcr.io/artem-nefedov/givi
+      - ghcr.io/artem-nefedov/genver
     tags:
       - "{{ .Version }}-alpine"
       - latest-alpine
@@ -76,12 +76,12 @@ dockers_v2:
     labels:
       org.opencontainers.image.title: "{{ .ProjectName }}"
       org.opencontainers.image.version: "{{ .Version }}"
-      org.opencontainers.image.source: "https://github.com/artem-nefedov/givi"
+      org.opencontainers.image.source: "https://github.com/artem-nefedov/genver"
 
 release:
   github:
     owner: artem-nefedov
-    name: givi
+    name: genver
 
 changelog:
   use: github

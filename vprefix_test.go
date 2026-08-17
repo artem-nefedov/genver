@@ -7,7 +7,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
-// When no --format / --tag-format is given, givi guesses the default spelling
+// When no --format / --tag-format is given, genver guesses the default spelling
 // from the boundary tag the version builds on: a "v"-prefixed boundary tag
 // yields "v"-prefixed output and tags, a bare (or absent) one stays bare.
 // Explicit templates always win.

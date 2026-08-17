@@ -32,8 +32,8 @@ More technical details on how it works.
 
 ## Example
 
-- last commit on main is tagged as "2.1.0"; running givi on main outputs "2.1.0"
-- develop branch was only just merged into main and had no new commits since; givi still outputs "2.1.0-alpha.123"
+- last commit on main is tagged as "2.1.0"; running genver on main outputs "2.1.0"
+- develop branch was only just merged into main and had no new commits since; genver still outputs "2.1.0-alpha.123"
 - we add direct commit to develop - it now outputs "2.1.1-alpha.1"
 - we add another direct commit - version is "2.1.1-alpha.2"
 - we create branch bugfix/ABC-123-foo_bar; it has no new commits yet; version is "2.1.1-ABC-123-foo-bar.0"

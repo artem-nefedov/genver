@@ -11,7 +11,7 @@ import (
 func TestDeletingMergedBranchDoesNotChangeVersion(t *testing.T) {
 	t.Parallel()
 
-	// givi derives a merge's nature (feature/bugfix/directive) solely from the
+	// genver derives a merge's nature (feature/bugfix/directive) solely from the
 	// merge commit's MESSAGE, never from branch refs — real git-flow deletes
 	// short-lived branches after merge. Each case computes the version with the
 	// merged branch ref still present, deletes it, and asserts the version is
@@ -1431,7 +1431,7 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.tag("1.2.3-mywork.2", mustHead(t, h))
 		h.want("1.2.3-mywork.2")
 
-		h.merge("bugfix/b") // non-feature merge: no explicit signal, counter only
+		h.merge("bugfix/b")      // non-feature merge: no explicit signal, counter only
 		h.want("1.2.3-mywork.4") // core stays 1.2.3
 	})
 
@@ -1494,7 +1494,7 @@ func TestReferenceTagDownwardAnchor(t *testing.T) {
 		h.commit("f1")
 		h.checkout("main")
 		mc := h.merge("feature/ref") // feature merge would bump minor -> 1.3.0
-		h.tag("1.2.3-foobar.2", mc) // tag ON the merge commit reverts it
+		h.tag("1.2.3-foobar.2", mc)  // tag ON the merge commit reverts it
 		h.want("1.2.3")
 	})
 }
@@ -1533,7 +1533,7 @@ func TestReferenceTagPatchPropagation(t *testing.T) {
 		h.commit("f1")
 		h.tag("1.2.3-x.2", mustHead(t, h))
 		h.checkout("develop")
-		h.merge("feature/x") // plain merge, no +semver
+		h.merge("feature/x")    // plain merge, no +semver
 		h.want("1.2.3-alpha.4") // patch inherited from the capped feature branch
 
 		h.checkout("main")
@@ -1555,7 +1555,7 @@ func TestReferenceTagPatchPropagation(t *testing.T) {
 		h.commit("f2") // plain commit after the tag: counter only
 		h.want("1.2.3-foo.6")
 		h.checkout("develop")
-		h.merge("feature/foo") // plain feature merge integrating the tagged branch
+		h.merge("feature/foo")  // plain feature merge integrating the tagged branch
 		h.want("1.2.3-alpha.5") // stays 1.2.3, NOT 1.3.0
 		h.checkout("main")
 		h.merge("develop")
@@ -1606,7 +1606,7 @@ func TestReferenceTagPatchPropagation(t *testing.T) {
 		h.newBranch("feature/b")
 		h.commit("b1")
 		h.merge("feature/a") // merge the capped branch into feature/b
-		h.want("1.3.0-b.3") // feature/b keeps its own minor
+		h.want("1.3.0-b.3")  // feature/b keeps its own minor
 
 		h.checkout("develop")
 		h.merge("feature/b")
@@ -1818,7 +1818,7 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-cool-abc.3")
 		h.checkout("main")
 		h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
-		h.want("0.2.0") // minor bumped ONCE (not once per feature commit)
+		h.want("0.2.0")             // minor bumped ONCE (not once per feature commit)
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
 		h.backMerge()
@@ -1843,7 +1843,7 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-cool-abc.3") // minor increment from the feat/ prefix
 		h.checkout("main")
 		h.merge("feat/cool-abc") // "Merge branch 'feat/cool-abc'"
-		h.want("0.2.0") // minor bumped ONCE via the feat/ merge
+		h.want("0.2.0")          // minor bumped ONCE via the feat/ merge
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
 		h.backMerge()
@@ -1867,7 +1867,7 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-cool-abc.3")
 		h.checkout("main")
 		mg = h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
-		h.want("0.2.0") // minor bumped ONCE (not once per feature commit)
+		h.want("0.2.0")                  // minor bumped ONCE (not once per feature commit)
 		h.tag("0.2.0", mg)
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
@@ -2139,7 +2139,7 @@ func TestMainSemverOverrides(t *testing.T) {
 
 // TestTagOverridesCalculatedVersion verifies that a semver tag on main is the
 // source of truth for the release core: when the tagged value disagrees with
-// what givi would otherwise calculate (whether the tag is higher OR lower than
+// what genver would otherwise calculate (whether the tag is higher OR lower than
 // the calculated version), main reports the tag, and every derived calculation
 // on develop and on other branches builds on the tagged core rather than on the
 // calculated one.
@@ -2249,7 +2249,7 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.commit("f1")
 		h.checkout("develop")
 		h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
-		h.want("0.2.0-alpha.2") // minor bump from the feature merge
+		h.want("0.2.0-alpha.2")     // minor bump from the feature merge
 	})
 
 	t.Run("RemoteTracking", func(t *testing.T) {
@@ -2622,7 +2622,7 @@ func TestBranchMergeIntoDevelopMessageSemver(t *testing.T) {
 		h.want("1.0.0-alpha.2")
 		h.checkout("main")
 		h.merge("develop") // plain release merge, no marker of its own
-		h.want("1.0.0")     // develop's major-bumped core is released
+		h.want("1.0.0")    // develop's major-bumped core is released
 	})
 }
 
@@ -2653,7 +2653,7 @@ func TestFeatureMergePropagatesThroughBugfix(t *testing.T) {
 	h.commit("f1")
 	h.checkout("bugfix/foo")
 	h.merge("feature/bar") // "Merge branch 'feature/bar'"
-	h.want("0.2.0-foo.3") // minor now: b1 + f1 + merge = 3 commits
+	h.want("0.2.0-foo.3")  // minor now: b1 + f1 + merge = 3 commits
 
 	// Merge the bugfix branch into develop. The feature merge is now in develop's
 	// section, so develop is minor-bumped too.
@@ -2693,7 +2693,7 @@ func TestFeatureMergeThroughBugfixDirectToMain(t *testing.T) {
 	h.commit("f1")
 	h.checkout("bugfix/foo")
 	h.merge("feature/bar") // "Merge branch 'feature/bar'"
-	h.want("0.2.0-foo.3") // minor now: b1 + f1 + merge = 3 commits
+	h.want("0.2.0-foo.3")  // minor now: b1 + f1 + merge = 3 commits
 
 	// Merge the bugfix branch directly into main: the feature merge in the
 	// bugfix's history must lift the direct merge to a minor, applied once.
@@ -2769,12 +2769,12 @@ func TestFlagHelpAndVersion(t *testing.T) {
 	h.commit("root")
 
 	out, err := runCapture(t, h, "--help")
-	if err != nil || !strings.Contains(out, "Usage: givi") {
+	if err != nil || !strings.Contains(out, "Usage: genver") {
 		t.Errorf("--help: out=%q err=%v", out, err)
 	}
 	// --help beats --version.
 	out, err = runCapture(t, h, "--help", "--version")
-	if err != nil || !strings.Contains(out, "Usage: givi") {
+	if err != nil || !strings.Contains(out, "Usage: genver") {
 		t.Errorf("--help priority: out=%q err=%v", out, err)
 	}
 	out, err = runCapture(t, h, "--version")

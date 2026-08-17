@@ -1,4 +1,4 @@
-module github.com/artem-nefedov/givi
+module github.com/artem-nefedov/genver
 
 go 1.26.5
 

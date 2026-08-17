@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -626,13 +627,7 @@ func (m *ancestorMemo) reaches(h plumbing.Hash) bool {
 		return v
 	}
 	m.cache[h] = false // break potential cycles (a DAG has none, but be safe)
-	res := false
-	for _, ph := range m.pool[h] {
-		if m.reaches(ph) {
-			res = true
-			break
-		}
-	}
+	res := slices.ContainsFunc(m.pool[h], m.reaches)
 	m.cache[h] = res
 	return res
 }
@@ -960,7 +955,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 // merge from the develop integration branch (as opposed to a direct merge of a
 // feature/other branch into main). An unrecognized merge message defaults to a
 // release merge, preserving the historical "every main merge releases develop"
-// behavior for repositories whose merge commits givi cannot attribute.
+// behavior for repositories whose merge commits genver cannot attribute.
 func (c *calculator) isDevelopReleaseMerge(cm *object.Commit) bool {
 	name := mergedBranchName(cm)
 	return name == "" || name == "develop"

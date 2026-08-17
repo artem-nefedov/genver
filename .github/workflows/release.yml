@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # GoReleaser and givi both need the full history and all tags to
+          # GoReleaser and genver both need the full history and all tags to
           # compute the version and the changelog.
           fetch-depth: 0
 
@@ -38,7 +38,7 @@ jobs:
       - name: Run tests
         run: make test
 
-      # A single givi invocation does everything version-related for this run:
+      # A single genver invocation does everything version-related for this run:
       # it computes the release version, creates the matching lightweight tag at
       # HEAD (--tag-main), pushes ONLY that tag to origin (--push-tag-to), and
       # prints the computed version on stdout, which we capture. The version is
@@ -49,7 +49,7 @@ jobs:
       # the URL's userinfo (it does not read the http.extraheader credential
       # actions/checkout installs); GITHUB_TOKEN carries the contents:write scope
       # needed to push a tag.
-      - name: Compute version, tag, and push the tag with givi
+      - name: Compute version, tag, and push the tag with genver
         id: version
         env:
           PUSH_URL: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git

@@ -144,7 +144,7 @@ func TestPushTagToURL(t *testing.T) {
 	}
 }
 
-// TestPushTagToPreexistingTag pushes when the tag already exists on HEAD (givi
+// TestPushTagToPreexistingTag pushes when the tag already exists on HEAD (genver
 // did not create it this run), in both lightweight and annotated form.
 func TestPushTagToPreexistingTag(t *testing.T) {
 	t.Parallel()
@@ -159,7 +159,7 @@ func TestPushTagToPreexistingTag(t *testing.T) {
 			head := h.commit("root")
 			url, st := newMemRemote(t)
 
-			// Pre-create the tag 0.1.0 on HEAD before givi runs.
+			// Pre-create the tag 0.1.0 on HEAD before genver runs.
 			if annotated {
 				h.annotatedTag("0.1.0", head)
 			} else {
@@ -179,8 +179,8 @@ func TestPushTagToPreexistingTag(t *testing.T) {
 
 // TestPushTagToTagOnOtherCommit errors when a tag with the computed name exists
 // but points at a different commit than HEAD. The clash is built by tagging an
-// off-chain commit with the name givi computes for main's HEAD (0.1.0): the tag
-// exists but does not mark HEAD, so givi must refuse to push it.
+// off-chain commit with the name genver computes for main's HEAD (0.1.0): the tag
+// exists but does not mark HEAD, so genver must refuse to push it.
 func TestPushTagToTagOnOtherCommit(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)

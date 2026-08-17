@@ -1,7 +1,7 @@
 # Compiled binary (matches `go build`/`go install .` output for this module)
-/givi
+/genver
 # Bootstrap binary built in the release workflow to compute the version
-/givi-bootstrap
+/genver-bootstrap
 
 # GoReleaser output
 /dist/

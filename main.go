@@ -8,13 +8,13 @@ import (
 	"strings"
 )
 
-// version is givi's own version, overridable at build time with
+// version is genver's own version, overridable at build time with
 // -ldflags "-X main.version=vX.Y.Z".
 var version = "dev"
 
-const usage = `givi - a dumb GitVersion clone
+const usage = `genver - Git SemVer generator
 
-Usage: givi [flag]
+Usage: genver [flag]
 
 Outputs a semantic version derived from the local git tree.
 With no flag it prints the version for the current branch and exits.
@@ -22,7 +22,7 @@ Default is format is '{{.Full}}', or 'v{{.Full}}' if v-prefixed tag is found.
 
 Flags:
   --help              Show this help and exit.
-  --version           Show givi's own version and exit.
+  --version           Show genver's own version and exit.
   --format <tmpl>     Render the version through a template instead of printing
                       the default. <tmpl> is a Go template with exposed fields:
                       .Full, .Core, .Major, .Minor, .Patch, .PreRelease, .Count,
@@ -46,7 +46,7 @@ Flags:
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "givi: "+err.Error())
+		fmt.Fprintln(os.Stderr, "genver: "+err.Error())
 		os.Exit(1)
 	}
 }
@@ -59,13 +59,13 @@ func run(args []string, out, errOut io.Writer) error {
 // the repository at the current directory is opened; tests pass an in-memory
 // repo to avoid touching disk.
 func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
-	fs := flag.NewFlagSet("givi", flag.ContinueOnError)
+	fs := flag.NewFlagSet("genver", flag.ContinueOnError)
 	fs.SetOutput(out)
 	fs.Usage = func() { fmt.Fprint(out, usage) }
 
 	var (
 		showHelp      = fs.Bool("help", false, "show help")
-		showVersion   = fs.Bool("version", false, "show givi version")
+		showVersion   = fs.Bool("version", false, "show genver version")
 		formatTmpl    = fs.String("format", "", "render the version through a Go template")
 		tagFormatTmpl = fs.String("tag-format", "", "like --format, but only shapes the tag from --tag-main")
 		writeTo       = fs.String("write-to", "", "also write the output to the file(s) named by this template, one per non-blank line")
@@ -176,7 +176,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 			}
 
 			// --push-tag-to only takes effect alongside --tag-main on main. The
-			// tag must mark HEAD, whether givi just created it above or it was
+			// tag must mark HEAD, whether genver just created it above or it was
 			// already present (lightweight or annotated) on this commit.
 			if *pushTagTo != "" {
 				if err := g.verifyTagAtHead(tagVal, head.Hash); err != nil {

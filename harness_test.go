@@ -18,7 +18,7 @@ import (
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
 
-// harness drives a git repo through the workflow so we can assert givi's
+// harness drives a git repo through the workflow so we can assert genver's
 // output at each step of the TASK.md worked example. The repository is backed
 // entirely by an in-memory filesystem, so tests never touch disk.
 type harness struct {
@@ -238,7 +238,7 @@ func (h *harness) deleteBranch(branch string) {
 	}
 }
 
-// want asserts givi's output for the current branch equals expect.
+// want asserts genver's output for the current branch equals expect.
 func (h *harness) want(expect string) {
 	h.t.Helper()
 	if got := h.version(); got != expect {
@@ -247,7 +247,7 @@ func (h *harness) want(expect string) {
 	}
 }
 
-// version computes and returns givi's output for the current branch.
+// version computes and returns genver's output for the current branch.
 func (h *harness) version() string {
 	h.t.Helper()
 	branch, err := h.g.headBranch()

@@ -8,7 +8,7 @@ import (
 )
 
 // These tests reconstruct — entirely in the in-memory filesystem — two section
-// topologies that stress givi at scale: a small section built from a bugfix
+// topologies that stress genver at scale: a small section built from a bugfix
 // branch plus a trailing commit, and a large section (dozens of commits) that
 // contains a feature merge and a bugfix branch whose merge-base sits inside it.
 //

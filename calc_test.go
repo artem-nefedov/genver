@@ -137,7 +137,7 @@ func TestManyReleases(t *testing.T) {
 	h.want("0.2.0-urgent.1")
 }
 
-// TestCrossMergeCounting reproduces, in miniature, a bug where givi's develop
+// TestCrossMergeCounting reproduces, in miniature, a bug where genver's develop
 // counter diverged from GitVersion (and from `git rev-list base..HEAD`) on a
 // repository with cross-merges. After every release, main is merged back into
 // develop. That back-merge gives develop a second path to the previous

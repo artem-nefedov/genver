@@ -37,7 +37,7 @@ func buildAnchorLiftRepo(tb testing.TB, mergesAfter int) *harness {
 	// Many independent feature branches, each with a couple of commits, merged
 	// into develop AFTER the anchor. Every merge commit is a descendant of the
 	// anchor and a candidate that integratesAnchor inspects.
-	for i := 0; i < mergesAfter; i++ {
+	for i := range mergesAfter {
 		br := fmt.Sprintf("feature/indep-%d", i)
 		h.newBranch(br)
 		h.commit(fmt.Sprintf("i%d-a", i))
@@ -76,5 +76,3 @@ func benchmarkAnchorLift(b *testing.B, mergesAfter int) {
 func BenchmarkAnchorLiftManyMerges20(b *testing.B)  { benchmarkAnchorLift(b, 20) }
 func BenchmarkAnchorLiftManyMerges50(b *testing.B)  { benchmarkAnchorLift(b, 50) }
 func BenchmarkAnchorLiftManyMerges100(b *testing.B) { benchmarkAnchorLift(b, 100) }
-
-

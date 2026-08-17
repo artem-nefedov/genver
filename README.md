@@ -1,6 +1,6 @@
-# GiVI - Git Version Increment
+# GenVer - Git SemVer generator
 
-A dumb [GitVersion](https://github.com/gittools/gitversion) clone with zero configuration.
+A small [GitVersion](https://github.com/gittools/gitversion)-inspired tool with zero configuration.
 
 Generates semver-compatible version based on git tree and current HEAD.
 
@@ -9,18 +9,18 @@ Generates semver-compatible version based on git tree and current HEAD.
 ### Homebrew (macOS & Linux)
 
 ```sh
-brew install artem-nefedov/tap/givi
+brew install artem-nefedov/tap/genver
 ```
 
 ### Download binary
 
 Prebuilt binaries for Linux/macOS/Windows (amd64/arm64) are available on the
-[Releases](https://github.com/artem-nefedov/givi/releases) page.
+[Releases](https://github.com/artem-nefedov/genver/releases) page.
 
 ### Go install
 
 ```sh
-go install github.com/artem-nefedov/givi@latest
+go install github.com/artem-nefedov/genver@latest
 ```
 
 ### Docker images
@@ -28,8 +28,8 @@ go install github.com/artem-nefedov/givi@latest
 Images of two types (distroless and alpine) are available:
 
 ```
-ghcr.io/artem-nefedov/givi:latest
-ghcr.io/artem-nefedov/givi:latest-alpine
+ghcr.io/artem-nefedov/genver:latest
+ghcr.io/artem-nefedov/genver:latest-alpine
 ```
 
 Change "latest" to specific release to pin the version.
@@ -41,10 +41,11 @@ Change "latest" to specific release to pin the version.
 - Just outputs the version by default
 - Can make a guess if "v" prefix needs to be added based on existing tags
 - Version is a valid OCI/Docker tag in addition to semver compliance
-- Allows direct bump with `+semver` directive in commit message while still accounting for feature branch merge messages
+- Recognizes `+semver` messages and feature branch merge messages
 - Allows overriding bump level on merge commits with `+semver` directive
 - Allows usage of pre-release "reference" tags
 - Supports a few extra tricks, like formatting output and creating/pushing tags
+- Calculation logic may intentionally differ in some cases
 - Works only with the specific flow (see below)
 
 ## Supported flow

@@ -37,7 +37,7 @@ func (osFileWriter) WriteFile(name string, data []byte, perm os.FileMode) error 
 	return os.WriteFile(name, data, perm)
 }
 
-// repo wraps a go-git repository with the helpers givi needs. All operations
+// repo wraps a go-git repository with the helpers genver needs. All operations
 // are local; nothing here touches the network.
 type repo struct {
 	r     *git.Repository
@@ -76,7 +76,7 @@ func openRepo(path string) (*repo, error) {
 	// is the single biggest lever on read performance.
 	if fss, ok := base.Storer.(*filesystem.Storage); ok {
 		opts := filesystem.Options{
-			ExclusiveAccess: true, // givi never mutates the repo while reading
+			ExclusiveAccess: true, // genver never mutates the repo while reading
 			KeepDescriptors: true, // reuse pack file descriptors across reads
 		}
 		store := filesystem.NewStorageWithOptions(fss.Filesystem(), cache.NewObjectLRU(256*cache.MiByte), opts)
@@ -98,12 +98,12 @@ func (g *repo) headBranch() (string, error) {
 		return "", fmt.Errorf("resolve HEAD: %w", err)
 	}
 	if !h.Name().IsBranch() {
-		return "", fmt.Errorf("HEAD is detached; givi requires a checked-out branch")
+		return "", fmt.Errorf("HEAD is detached; genver requires a checked-out branch")
 	}
 	return h.Name().Short(), nil
 }
 
-// resolveBranch determines the branch name givi should compute a version for,
+// resolveBranch determines the branch name genver should compute a version for,
 // reconciling the optional --branch override with HEAD's actual state:
 //
 //   - Attached HEAD, no override: the checked-out branch (as headBranch).
@@ -128,7 +128,7 @@ func (g *repo) resolveBranch(override string) (string, error) {
 	}
 	// Detached HEAD.
 	if override == "" {
-		return "", fmt.Errorf("HEAD is detached; givi requires a checked-out branch (or pass --branch)")
+		return "", fmt.Errorf("HEAD is detached; genver requires a checked-out branch (or pass --branch)")
 	}
 	return override, nil
 }
@@ -445,7 +445,7 @@ func (g *repo) createLightweightTag(name string, hash plumbing.Hash) (bool, erro
 
 // verifyTagAtHead confirms that a tag named `name` exists and points at hash,
 // dereferencing annotated tags to their target commit. It errors if the tag is
-// missing or points at a different commit. This guards --push-tag-to: givi only
+// missing or points at a different commit. This guards --push-tag-to: genver only
 // pushes a tag it is certain marks HEAD, whether that tag was just created by
 // --tag-main or already existed (in lightweight or annotated form).
 func (g *repo) verifyTagAtHead(name string, hash plumbing.Hash) error {
@@ -496,7 +496,7 @@ func (g *repo) pushTag(name, remote string) error {
 	if !looksLikeURL(remote) {
 		return fmt.Errorf("remote %q not found; pass an existing remote name or a URL", remote)
 	}
-	rc := &config.RemoteConfig{Name: "givi-push-tag-to", URLs: []string{remote}}
+	rc := &config.RemoteConfig{Name: "genver-push-tag-to", URLs: []string{remote}}
 	if err := rc.Validate(); err != nil {
 		return fmt.Errorf("invalid remote URL %q: %w", remote, err)
 	}

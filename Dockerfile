@@ -2,6 +2,6 @@ FROM scratch
 
 ARG TARGETOS
 ARG TARGETARCH
-COPY ${TARGETOS}/${TARGETARCH}/givi /givi
+COPY ${TARGETOS}/${TARGETARCH}/genver /genver
 
-ENTRYPOINT ["/givi"]
+ENTRYPOINT ["/genver"]

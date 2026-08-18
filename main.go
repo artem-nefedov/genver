@@ -41,6 +41,8 @@ Flags:
   --push-tag-to <r>   Push the computed tag (nothing else) to remote <r>,
                       given as an existing remote name or a remote URL.
                       Requires --tag-main; ignored on a non-main branch.
+  --ssh-key <path>    Private key file for SSH pushes. If omitted, use default.
+                      Requires --push-tag-go. Ignored for non-SSH remotes.
   --debug             Trace every calculation step to stderr.
 `
 
@@ -73,6 +75,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		branchName    = fs.String("branch", "", "branch name to compute for; overrides a detached HEAD, must match a checked-out branch")
 		tagMain       = fs.Bool("tag-main", false, "tag HEAD on main with the computed version")
 		pushTagTo     = fs.String("push-tag-to", "", "push only the computed tag to the given remote name or URL")
+		sshKey        = fs.String("ssh-key", "", "private key file for SSH pushes; empty auto-detects a default key under ~/.ssh")
 		debug         = fs.Bool("debug", false, "trace calculation steps to stderr")
 	)
 
@@ -102,6 +105,10 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 
 	if *pushTagTo != "" && !*tagMain {
 		return fmt.Errorf("--push-tag-to requires --tag-main")
+	}
+
+	if *sshKey != "" && *pushTagTo == "" {
+		return fmt.Errorf("--ssh-key requires --push-tag-to")
 	}
 
 	if g == nil {
@@ -182,7 +189,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 				if err := g.verifyTagAtHead(tagVal, head.Hash); err != nil {
 					return err
 				}
-				if err := g.pushTag(tagVal, *pushTagTo); err != nil {
+				if err := g.pushTag(tagVal, *pushTagTo, *sshKey); err != nil {
 					return err
 				}
 				calc.logf("push-tag-to: pushed tag %q to %q", tagVal, redactURL(*pushTagTo))

@@ -13,6 +13,8 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"github.com/go-git/go-git/v5/storage/filesystem"
 )
 
@@ -492,14 +494,25 @@ func looksLikeURL(s string) bool {
 // remote, which is either the name of an already-configured remote or a remote
 // URL. The refspec is restricted to the one tag ref so no branches or other
 // tags are sent. An already-up-to-date remote is treated as success.
-func (g *repo) pushTag(name, remote string) error {
+//
+// sshKey selects the private key used when the resolved remote is an SSH
+// endpoint: an empty string means "auto-detect a default key under ~/.ssh",
+// while a non-empty value is the explicit path to a private key file. It is
+// ignored for non-SSH remotes (https, git, file, ...), which keep go-git's
+// default (URL-embedded credentials for https, none for the rest).
+func (g *repo) pushTag(name, remote, sshKey string) error {
 	spec := config.RefSpec(fmt.Sprintf("refs/tags/%s:refs/tags/%s", name, name))
 
 	// Prefer an existing configured remote so its stored URL and options apply.
 	if _, err := g.r.Remote(remote); err == nil {
+		auth, err := sshAuthFor(remote, sshKey)
+		if err != nil {
+			return err
+		}
 		return normalizePushErr(g.r.Push(&git.PushOptions{
 			RemoteName: remote,
 			RefSpecs:   []config.RefSpec{spec},
+			Auth:       auth,
 		}), name, remote)
 	}
 
@@ -512,12 +525,91 @@ func (g *repo) pushTag(name, remote string) error {
 	if err := rc.Validate(); err != nil {
 		return fmt.Errorf("invalid remote URL %q: %w", remote, err)
 	}
+	auth, err := sshAuthFor(remote, sshKey)
+	if err != nil {
+		return err
+	}
 	r := git.NewRemote(g.r.Storer, rc)
 	return normalizePushErr(r.Push(&git.PushOptions{
 		RemoteName: rc.Name,
 		RemoteURL:  remote,
 		RefSpecs:   []config.RefSpec{spec},
+		Auth:       auth,
 	}), name, remote)
+}
+
+// defaultSSHKeyNames lists the private-key basenames tried under ~/.ssh, in
+// order, when pushing over SSH without an explicit --ssh-key. The order mirrors
+// OpenSSH's own preference (modern algorithms first).
+var defaultSSHKeyNames = []string{"id_ed25519", "id_ecdsa", "id_rsa"}
+
+// sshAuthFor returns a go-git AuthMethod for pushing to `remote` when it is an
+// SSH endpoint, and nil otherwise (letting go-git apply its protocol default).
+// keyPath, when non-empty, is the explicit private-key file to use; when empty,
+// a default key under ~/.ssh is auto-detected. The SSH user is taken from the
+// remote URL (e.g. the "git" in git@github.com), defaulting to "git".
+func sshAuthFor(remote, keyPath string) (transport.AuthMethod, error) {
+	// A configured remote name (not a URL) still resolves to a URL inside
+	// go-git; but here `remote` is only ever a name when it exists as a
+	// configured remote, in which case its own URL carries the protocol. We
+	// only build SSH auth for values we can recognize as SSH URLs.
+	ep, err := transport.NewEndpoint(remote)
+	if err != nil || ep.Protocol != "ssh" {
+		return nil, nil
+	}
+
+	user := ep.User
+	if user == "" {
+		user = "git"
+	}
+
+	if keyPath == "" {
+		keyPath, err = defaultSSHKey()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		keyPath = expandHome(keyPath)
+	}
+
+	// An empty passphrase covers the common CI case of an unencrypted key.
+	// Encrypted keys are better handled via an ssh-agent (SSH_AUTH_SOCK),
+	// which go-git uses automatically when no explicit Auth is supplied.
+	auth, err := ssh.NewPublicKeysFromFile(user, keyPath, "")
+	if err != nil {
+		return nil, fmt.Errorf("load ssh key %q: %w", keyPath, err)
+	}
+	return auth, nil
+}
+
+// defaultSSHKey returns the path to the first existing default private key
+// under ~/.ssh, trying defaultSSHKeyNames in order. It errors if none exist so
+// the failure is a clear "no key found" rather than a later auth error.
+func defaultSSHKey() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("locate home directory for default ssh key: %w", err)
+	}
+	dir := filepath.Join(home, ".ssh")
+	for _, name := range defaultSSHKeyNames {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
+	}
+	return "", fmt.Errorf("no default ssh key found in %s (tried %s); pass --ssh-key",
+		dir, strings.Join(defaultSSHKeyNames, ", "))
+}
+
+// expandHome expands a leading "~/" (or a bare "~") in a path to the user's
+// home directory, leaving other paths unchanged.
+func expandHome(p string) string {
+	if p == "~" || strings.HasPrefix(p, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, strings.TrimPrefix(p, "~"))
+		}
+	}
+	return p
 }
 
 // normalizePushErr turns go-git's "already up-to-date" sentinel into success

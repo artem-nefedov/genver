@@ -2709,7 +2709,9 @@ func TestTagOverridesCalculatedVersion(t *testing.T) {
 	})
 
 	// A tag LOWER than the calculated value still wins: the +semver-driven
-	// calculation (which would reach 2.0.0) is overridden by the 0.3.0 tag.
+	// calculation (which would reach 2.0.0) is overridden by the 0.3.0 tag, and
+	// develop, feature, and bugfix derivations all build on the lower 0.3.x core
+	// rather than the untagged 2.0.x.
 	t.Run("LowerTagOnMain", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -2725,10 +2727,28 @@ func TestTagOverridesCalculatedVersion(t *testing.T) {
 		h.commit("plain")
 		h.want("0.3.1")
 
-		// develop off the tagged commit builds on 0.3.0.
+		// develop off the tagged commit builds on 0.3.0, and its own commits keep
+		// advancing from the LOWER core, never resurfacing the untagged 2.0.x.
 		h.checkout("main")
 		h.newBranch("develop")
 		h.want("0.3.1-alpha.1") // one commit ("plain") above the 0.3.0 boundary
+		h.commit("d1")
+		h.want("0.3.2-alpha.1") // patch off 0.3.1, not off 2.0.0
+		h.commit("d2")
+		h.want("0.3.2-alpha.2")
+
+		// A feature branch derives its minor from the lower tag core: 0.4.0, NOT
+		// 2.1.0 (the untagged core) and NOT 0.2.0 (root). This is where ignoring
+		// the boundary would diverge most visibly.
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.want("0.4.0-x.1")
+
+		// A bugfix branch derives a patch off the same lower core.
+		h.checkout("develop")
+		h.newBranch("bugfix/y")
+		h.commit("b1")
+		h.want("0.3.2-y.1")
 	})
 
 	// A tag on a release merge commit overrides the calculated release core, and
@@ -3360,6 +3380,109 @@ func TestMultipleMergesBumpOnce(t *testing.T) {
 		// Each bugfix contributes 2 commits: 3 bugfixes = 6.
 		h.want("0.1.1-alpha.6")
 	})
+}
+
+// TestMultipleUntaggedMergesIntoMain covers the main-based flow (NO develop
+// during the merges, NO tags): several feature/bugfix branches are merged
+// DIRECTLY into main, one after another. Each direct merge advances the release
+// core exactly once (feature floors at minor, bugfix at patch), so the cores
+// accumulate across the merges. Afterward, a develop branch and another feature
+// branch derive their versions from main's accumulated core.
+func TestMultipleUntaggedMergesIntoMain(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root") // main = 0.1.0, untagged
+
+	// Merge 1: a feature branch -> minor. 0.1.0 -> 0.2.0.
+	h.newBranch("feature/one")
+	h.commit("f1")
+	h.checkout("main")
+	h.merge("feature/one")
+	h.want("0.2.0")
+
+	// Merge 2: a bugfix branch -> patch. 0.2.0 -> 0.2.1.
+	h.newBranch("bugfix/two")
+	h.commit("b1")
+	h.checkout("main")
+	h.merge("bugfix/two")
+	h.want("0.2.1")
+
+	// Merge 3: another feature branch -> minor. 0.2.1 -> 0.3.0.
+	h.newBranch("feature/three")
+	h.commit("f3")
+	h.checkout("main")
+	h.merge("feature/three")
+	h.want("0.3.0") // three direct merges accumulated: minor, patch, minor
+
+	// Downstream: a develop branch created off main. develop's reachable section
+	// still includes the feature/three merge at its boundary, so the section sees
+	// a feature merge and floors at minor: 0.3.0 -> 0.4.0. A develop commit only
+	// advances the counter.
+	h.newBranch("develop")
+	h.want("0.4.0-alpha.1")
+	h.commit("d1")
+	h.want("0.4.0-alpha.2")
+
+	// Downstream: another feature branch derives its minor from develop's core.
+	h.newBranch("feature/x")
+	h.commit("fx1")
+	h.want("0.4.0-x.1")
+}
+
+// TestMultipleUntaggedDevelopToMainCycles covers the develop-to-main flow (WITH
+// develop, NO tags): features/bugfixes are merged into develop, then develop is
+// merged into main as an untagged release merge, and the whole cycle repeats.
+// Each untagged develop->main release merge advances main's core once (from
+// develop's accumulated section bump), so the cores accumulate across cycles.
+// Afterward, develop and another feature branch derive from main's core.
+func TestMultipleUntaggedDevelopToMainCycles(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("root") // main = 0.1.0, untagged
+	h.newBranch("develop")
+
+	// Cycle 1: a feature into develop, then develop -> main (untagged). The
+	// release carries develop's minor: 0.1.0 -> 0.2.0.
+	h.newBranch("feature/one")
+	h.commit("f1")
+	h.checkout("develop")
+	h.merge("feature/one")
+	h.checkout("main")
+	h.merge("develop")
+	h.want("0.2.0")
+
+	// Cycle 2: a bugfix into develop, then develop -> main (untagged): patch.
+	// 0.2.0 -> 0.2.1.
+	h.checkout("develop")
+	h.newBranch("bugfix/two")
+	h.commit("b1")
+	h.checkout("develop")
+	h.merge("bugfix/two")
+	h.checkout("main")
+	h.merge("develop")
+	h.want("0.2.1")
+
+	// Cycle 3: another feature into develop, then develop -> main (untagged):
+	// minor. 0.2.1 -> 0.3.0.
+	h.checkout("develop")
+	h.newBranch("feature/three")
+	h.commit("f3")
+	h.checkout("develop")
+	h.merge("feature/three")
+	h.checkout("main")
+	h.merge("develop")
+	h.want("0.3.0") // three untagged release merges accumulated: minor, patch, minor
+
+	// Downstream: develop after all the cycles builds on main's 0.3.0 core.
+	h.checkout("develop")
+	h.want("0.3.0-alpha.2")
+	h.commit("d1")
+	h.want("0.3.1-alpha.1")
+
+	// Downstream: another feature branch derives its minor from develop's core.
+	h.newBranch("feature/x")
+	h.commit("fx1")
+	h.want("0.4.0-x.1")
 }
 
 // TestUnattributedMergeBoundary covers develop-boundary discovery over an

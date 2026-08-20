@@ -9,25 +9,25 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
-// TestTagFormatOnly: with only --tag-format, it shapes the tag created by
+// TestFormatTagOnly: with only --format-tag, it shapes the tag created by
 // --tag-main but leaves stdout as the full computed version.
-func TestTagFormatOnly(t *testing.T) {
+func TestFormatTagOnly(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	head := h.commit("root") // main = 0.1.0
 
-	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}")
+	out, err := runCapture(t, h, "--tag-main", "--format-tag", "v{{.Full}}")
 	if err != nil || out != "0.1.0" {
-		t.Fatalf("--tag-format only: out=%q err=%v, want stdout %q", out, err, "0.1.0")
+		t.Fatalf("--format-tag only: out=%q err=%v, want stdout %q", out, err, "0.1.0")
 	}
 
-	// The tag must use the --tag-format template.
+	// The tag must use the --format-tag template.
 	if got := localTagHash(t, h, "v0.1.0"); got != head {
 		t.Errorf("tag v0.1.0 points at %s, want HEAD %s", got, head)
 	}
 	// The unformatted full version must NOT have been tagged.
 	if got := localTagHash(t, h, "0.1.0"); got != plumbing.ZeroHash {
-		t.Errorf("unformatted tag 0.1.0 exists (%s) but --tag-format should shape the tag", got)
+		t.Errorf("unformatted tag 0.1.0 exists (%s) but --format-tag should shape the tag", got)
 	}
 }
 
@@ -52,9 +52,9 @@ func TestFormatOnlyLeavesTagUnshaped(t *testing.T) {
 	}
 }
 
-// TestFormatAndTagFormat: when both are given, --format shapes stdout (and
-// --write-to) while --tag-format shapes only the tag.
-func TestFormatAndTagFormat(t *testing.T) {
+// TestFormatAndFormatTag: when both are given, --format shapes stdout (and
+// --write-to) while --format-tag shapes only the tag.
+func TestFormatAndFormatTag(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	head := h.commit("root") // main = 0.1.0
@@ -62,53 +62,53 @@ func TestFormatAndTagFormat(t *testing.T) {
 	out, err := runCapture(t, h,
 		"--tag-main",
 		"--format", "out-{{.Full}}",
-		"--tag-format", "tag-{{.Full}}",
+		"--format-tag", "tag-{{.Full}}",
 		"--write-to", "version.txt",
 	)
 	if err != nil || out != "out-0.1.0" {
 		t.Fatalf("both formats: out=%q err=%v, want stdout %q", out, err, "out-0.1.0")
 	}
 
-	// --write-to follows --format, not --tag-format.
+	// --write-to follows --format, not --format-tag.
 	if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "out-0.1.0" {
 		t.Errorf("write-to content = %q, want %q", got, "out-0.1.0")
 	}
 
-	// The tag follows --tag-format.
+	// The tag follows --format-tag.
 	if got := localTagHash(t, h, "tag-0.1.0"); got != head {
 		t.Errorf("tag tag-0.1.0 points at %s, want HEAD %s", got, head)
 	}
 	if got := localTagHash(t, h, "out-0.1.0"); got != plumbing.ZeroHash {
-		t.Errorf("stdout-format tag out-0.1.0 exists (%s) but the tag must use --tag-format", got)
+		t.Errorf("stdout-format tag out-0.1.0 exists (%s) but the tag must use --format-tag", got)
 	}
 }
 
-// TestTagFormatWriteTo: --tag-format never affects --write-to; the file gets
+// TestFormatTagWriteTo: --format-tag never affects --write-to; the file gets
 // the full computed version, not the tag-shaped one.
-func TestTagFormatWriteTo(t *testing.T) {
+func TestFormatTagWriteTo(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.commit("root") // main = 0.1.0
 
-	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}", "--write-to", "version.txt")
+	out, err := runCapture(t, h, "--tag-main", "--format-tag", "v{{.Full}}", "--write-to", "version.txt")
 	if err != nil || out != "0.1.0" {
-		t.Fatalf("--tag-format --write-to: out=%q err=%v", out, err)
+		t.Fatalf("--format-tag --write-to: out=%q err=%v", out, err)
 	}
 	if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "0.1.0" {
 		t.Errorf("write-to content = %q, want %q", got, "0.1.0")
 	}
 }
 
-// TestTagFormatRequiresTagMain asserts --tag-format without --tag-main is a
+// TestFormatTagRequiresTagMain asserts --format-tag without --tag-main is a
 // usage error (not a silent no-op), and that nothing is tagged as a result.
-func TestTagFormatRequiresTagMain(t *testing.T) {
+func TestFormatTagRequiresTagMain(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.commit("root")
 
-	_, _, err := runCaptureAll(t, h, "--tag-format", "v{{.Full}}")
+	_, _, err := runCaptureAll(t, h, "--format-tag", "v{{.Full}}")
 	if err == nil {
-		t.Fatal("expected error for --tag-format without --tag-main")
+		t.Fatal("expected error for --format-tag without --tag-main")
 	}
 	if !strings.Contains(err.Error(), "requires --tag-main") {
 		t.Errorf("unexpected error: %v", err)
@@ -119,8 +119,8 @@ func TestTagFormatRequiresTagMain(t *testing.T) {
 	}
 }
 
-// TestTagFormatPushTagTo: --push-tag-to pushes the --tag-format-shaped tag.
-func TestTagFormatPushTagTo(t *testing.T) {
+// TestFormatTagPushTagTo: --push-tag-to pushes the --format-tag-shaped tag.
+func TestFormatTagPushTagTo(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	head := h.commit("root") // main = 0.1.0
@@ -133,9 +133,9 @@ func TestTagFormatPushTagTo(t *testing.T) {
 		t.Fatalf("create remote: %v", err)
 	}
 
-	out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin", "--tag-format", "v{{.Full}}")
+	out, _, err := runCaptureAll(t, h, "--tag-main", "--push-tag-to", "origin", "--format-tag", "v{{.Full}}")
 	if err != nil || out != "0.1.0" {
-		t.Fatalf("--tag-format --push-tag-to: out=%q err=%v", out, err)
+		t.Fatalf("--format-tag --push-tag-to: out=%q err=%v", out, err)
 	}
 
 	// The shaped tag must have been pushed to the remote.
@@ -143,25 +143,25 @@ func TestTagFormatPushTagTo(t *testing.T) {
 		t.Errorf("tag v0.1.0 on remote points at %s, want HEAD %s", got, head)
 	}
 	if got := memTagHash(t, st, "0.1.0"); got != plumbing.ZeroHash {
-		t.Errorf("unformatted tag 0.1.0 pushed (%s) but --tag-format should shape the pushed tag", got)
+		t.Errorf("unformatted tag 0.1.0 pushed (%s) but --format-tag should shape the pushed tag", got)
 	}
 }
 
-// TestTagFormatIgnoredOnNonMain: --tag-format never shapes stdout, and no tag
+// TestFormatTagIgnoredOnNonMain: --format-tag never shapes stdout, and no tag
 // is made off main.
-func TestTagFormatIgnoredOnNonMain(t *testing.T) {
+func TestFormatTagIgnoredOnNonMain(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.commit("root")
 	h.newBranch("develop")
 	h.commit("d1")
 
-	out, err := runCapture(t, h, "--tag-main", "--tag-format", "v{{.Full}}")
+	out, err := runCapture(t, h, "--tag-main", "--format-tag", "v{{.Full}}")
 	if err != nil {
-		t.Fatalf("--tag-format on develop: out=%q err=%v", out, err)
+		t.Fatalf("--format-tag on develop: out=%q err=%v", out, err)
 	}
 	if strings.HasPrefix(out, "v") {
-		t.Errorf("stdout %q should not be shaped by --tag-format", out)
+		t.Errorf("stdout %q should not be shaped by --format-tag", out)
 	}
 	// No tag should have been created off main.
 	iter, err := h.g.r.Tags()
@@ -595,7 +595,7 @@ func TestFormat(t *testing.T) {
 // TestFormatFor covers --format-for, a repeatable "prefix=template" flag that
 // shapes the output per branch prefix. A matching branch (first match, in the
 // order given, wins) uses its rule's template; a non-matching branch falls back
-// to --format, or the default when --format is unset. --tag-format is never
+// to --format, or the default when --format is unset. --format-tag is never
 // affected.
 func TestFormatFor(t *testing.T) {
 	t.Parallel()
@@ -707,9 +707,9 @@ func TestFormatFor(t *testing.T) {
 		}
 	})
 
-	// --format-for does not affect --tag-format: the tag is shaped on main even
+	// --format-for does not affect --format-tag: the tag is shaped on main even
 	// though "main" matches no rule, while stdout uses the default.
-	t.Run("DoesNotAffectTagFormat", func(t *testing.T) {
+	t.Run("DoesNotAffectFormatTag", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		head := h.commit("root") // main = 0.1.0
@@ -717,10 +717,10 @@ func TestFormatFor(t *testing.T) {
 		out, err := runCapture(t, h,
 			"--tag-main",
 			"--format-for", "feature/=feat-{{.Full}}",
-			"--tag-format", "v{{.Full}}",
+			"--format-tag", "v{{.Full}}",
 		)
 		if err != nil {
-			t.Fatalf("with --tag-format: err=%v", err)
+			t.Fatalf("with --format-tag: err=%v", err)
 		}
 		if out != "0.1.0" {
 			t.Errorf("stdout = %q, want default %q", out, "0.1.0")

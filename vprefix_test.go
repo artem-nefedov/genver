@@ -7,7 +7,7 @@ import (
 	"github.com/go-git/go-git/v5/plumbing"
 )
 
-// When no --format / --tag-format is given, genver guesses the default spelling
+// When no --format / --format-tag is given, genver guesses the default spelling
 // from the boundary tag the version builds on: a "v"-prefixed boundary tag
 // yields "v"-prefixed output and tags, a bare (or absent) one stays bare.
 // Explicit templates always win.
@@ -90,7 +90,7 @@ func TestMixedSpellingPrefersV(t *testing.T) {
 
 // TestExplicitFormatOverridesInheritedV: an explicit --format always wins over
 // the inherited "v" default for stdout and --write-to; the tag still inherits
-// the "v" when --tag-format is absent.
+// the "v" when --format-tag is absent.
 func TestExplicitFormatOverridesInheritedV(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -106,15 +106,15 @@ func TestExplicitFormatOverridesInheritedV(t *testing.T) {
 	if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "0.1.2" {
 		t.Errorf("write-to content = %q, want bare %q", got, "0.1.2")
 	}
-	// The tag still inherits the "v" (no --tag-format given).
+	// The tag still inherits the "v" (no --format-tag given).
 	if got := localTagHash(t, h, "v0.1.2"); got != head {
 		t.Errorf("tag v0.1.2 points at %s, want HEAD %s", got, head)
 	}
 }
 
-// TestExplicitTagFormatOverridesInheritedV: an explicit --tag-format wins over
+// TestExplicitFormatTagOverridesInheritedV: an explicit --format-tag wins over
 // the inherited "v" default for the tag, while stdout keeps the inherited "v".
-func TestExplicitTagFormatOverridesInheritedV(t *testing.T) {
+func TestExplicitFormatTagOverridesInheritedV(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	h.commit("root") // main = 0.1.0
@@ -122,16 +122,16 @@ func TestExplicitTagFormatOverridesInheritedV(t *testing.T) {
 	h.tag("v0.1.1", c)
 	head := h.commit("r2")
 
-	out, err := runCapture(t, h, "--tag-main", "--tag-format", "rel-{{.Full}}")
+	out, err := runCapture(t, h, "--tag-main", "--format-tag", "rel-{{.Full}}")
 	if err != nil || out != "v0.1.2" {
-		t.Fatalf("explicit --tag-format: out=%q err=%v, want inherited %q", out, err, "v0.1.2")
+		t.Fatalf("explicit --format-tag: out=%q err=%v, want inherited %q", out, err, "v0.1.2")
 	}
-	// The tag follows --tag-format, not the inherited default.
+	// The tag follows --format-tag, not the inherited default.
 	if got := localTagHash(t, h, "rel-0.1.2"); got != head {
 		t.Errorf("tag rel-0.1.2 points at %s, want HEAD %s", got, head)
 	}
 	if got := localTagHash(t, h, "v0.1.2"); got != plumbing.ZeroHash {
-		t.Errorf("inherited tag v0.1.2 exists (%s) but --tag-format should shape it", got)
+		t.Errorf("inherited tag v0.1.2 exists (%s) but --format-tag should shape it", got)
 	}
 }
 

@@ -8,7 +8,7 @@ import (
 	sprig "github.com/Masterminds/sprig/v3"
 )
 
-// formatVars is the data passed to a --format / --tag-format Go template. Every
+// formatVars is the data passed to a --format / --format-tag Go template. Every
 // exported field is a template variable; referencing anything else is a
 // parse-time error, so a typo like "{{.Prerlease}}" fails rather than expanding
 // to an empty string.

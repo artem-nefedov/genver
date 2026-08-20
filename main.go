@@ -28,7 +28,7 @@ Flags:
                       .Full, .Core, .Major, .Minor, .Patch, .PreRelease, .Count,
                       .HeadHash, .Branch. Allows usage of Sprig functions
                       (only hermetic by default). Doesn't affect tag.
-  --tag-format <tmpl> Like --format, but only affects the tag by --tag-main.
+  --format-tag <tmpl> Like --format, but only affects the tag by --tag-main.
   --write-to <tmpl>   Also write the output (honoring --format) to one or more
                       files. The argument is a Go template like --format. Every
                       non-blank line produced is a file path (whitespace trimmed).
@@ -71,7 +71,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		showHelp      = fs.Bool("help", false, "show help")
 		showVersion   = fs.Bool("version", false, "show genver version")
 		formatTmpl    = fs.String("format", "", "render the version through a Go template")
-		tagFormatTmpl = fs.String("tag-format", "", "like --format, but only shapes the tag from --tag-main")
+		formatTagTmpl = fs.String("format-tag", "", "like --format, but only shapes the tag from --tag-main")
 		writeTo       = fs.String("write-to", "", "also write the output to the file(s) named by this template, one per non-blank line")
 		allowNonHerm  = fs.Bool("allow-nonhermetic", false, "expose all Sprig template functions, including non-repeatable ones (env, now, uuidv4, ...)")
 		branchName    = fs.String("branch", "", "branch name to compute for; overrides a detached HEAD, must match a checked-out branch")
@@ -101,8 +101,8 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return nil
 	}
 
-	if *tagFormatTmpl != "" && !*tagMain {
-		return fmt.Errorf("--tag-format requires --tag-main")
+	if *formatTagTmpl != "" && !*tagMain {
+		return fmt.Errorf("--format-tag requires --tag-main")
 	}
 
 	if *pushTagTo != "" && !*tagMain {
@@ -148,7 +148,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	}
 
 	// v is the full computed version. defaultVal is the value used for the tag
-	// and the printed output when no explicit --tag-format / --format is given:
+	// and the printed output when no explicit --format-tag / --format is given:
 	// it inherits the boundary tag's own spelling, so a repository tagged with
 	// a leading "v" (e.g. "v1.2.3") keeps the "v" by default, while an untagged
 	// or bare-tagged repository stays bare. An explicit template always wins.
@@ -163,14 +163,14 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		defaultVal = v
 	}
 
-	// tagVal is what --tag-main tags with and --push-tag-to pushes. --tag-format
+	// tagVal is what --tag-main tags with and --push-tag-to pushes. --format-tag
 	// reshapes it explicitly; otherwise it defaults to the boundary-inherited
 	// spelling.
 	var tagVal string
-	if *tagFormatTmpl == "" {
+	if *formatTagTmpl == "" {
 		tagVal = defaultVal
 	} else {
-		tagVal, err = res.renderFormat(*tagFormatTmpl, *allowNonHerm)
+		tagVal, err = res.renderFormat(*formatTagTmpl, *allowNonHerm)
 		if err != nil {
 			return err
 		}

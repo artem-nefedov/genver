@@ -32,7 +32,9 @@ Flags:
   --write-to <tmpl>   Also write the output (honoring --format) to one or more
                       files. The argument is a Go template like --format. Every
                       non-blank line produced is a file path (whitespace trimmed).
-  --format-for <pfx>  Only apply --format when the branch starts with <pfx>.
+  --format-for <p=t>  A branch-prefix template as "prefix=template". May be
+                      specified multiple times. When the branch starts with a
+                      prefix, its template shapes the output instead of --format.
   --allow-nonhermetic Expose all Sprig template functions in --format/etc.,
                       including non-repeatable ones such as env, now and uuidv4.
   --branch <name>     Branch name. On a detached HEAD it supplies the branch;
@@ -64,11 +66,11 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	fs.SetOutput(out)
 	fs.Usage = func() { fmt.Fprint(out, usage) }
 
+	var formatForRules formatForList
 	var (
 		showHelp      = fs.Bool("help", false, "show help")
 		showVersion   = fs.Bool("version", false, "show genver version")
 		formatTmpl    = fs.String("format", "", "render the version through a Go template")
-		formatFor     = fs.String("format-for", "", "only apply --format when the branch name starts with this prefix")
 		tagFormatTmpl = fs.String("tag-format", "", "like --format, but only shapes the tag from --tag-main")
 		writeTo       = fs.String("write-to", "", "also write the output to the file(s) named by this template, one per non-blank line")
 		allowNonHerm  = fs.Bool("allow-nonhermetic", false, "expose all Sprig template functions, including non-repeatable ones (env, now, uuidv4, ...)")
@@ -77,6 +79,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		pushTagTo     = fs.String("push-tag-to", "", "push only the computed tag to the given remote name or URL")
 		debug         = fs.Bool("debug", false, "trace calculation steps to stderr")
 	)
+	fs.Var(&formatForRules, "format-for", `a "prefix=template" rule shaping output on a matching branch prefix (repeatable)`)
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -106,10 +109,6 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return fmt.Errorf("--push-tag-to requires --tag-main")
 	}
 
-	if *formatFor != "" && *formatTmpl == "" {
-		return fmt.Errorf("--format-for requires --format")
-	}
-
 	if g == nil {
 		var err error
 		g, err = openRepo(".")
@@ -123,8 +122,11 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return err
 	}
 
-	if *formatFor != "" && !strings.HasPrefix(branch, *formatFor) {
-		*formatTmpl = ""
+	var effectiveFormat string
+	if tmpl, ok := matchFormatFor(formatForRules, branch); ok {
+		effectiveFormat = tmpl
+	} else {
+		effectiveFormat = *formatTmpl
 	}
 
 	head, err := g.headCommit()
@@ -207,20 +209,21 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	}
 
 	var outText string
-	if *formatTmpl == "" {
+	if effectiveFormat == "" {
 		outText = defaultVal
 	} else {
-		outText, err = res.renderFormat(*formatTmpl, *allowNonHerm)
+		outText, err = res.renderFormat(effectiveFormat, *allowNonHerm)
 		if err != nil {
 			return err
 		}
 	}
 
-	// --write-to persists the same output (honoring --format) to one or more
-	// files, overwriting each if present. Its argument is rendered through the
-	// same template as --format; every non-blank line of the result names a
-	// file (leading/trailing whitespace trimmed) that the output is written to.
-	// The version is still printed to stdout below.
+	// --write-to persists the same output (honoring the effective --format /
+	// --format-for template) to one or more files, overwriting each if present.
+	// Its argument is rendered through the same template as the output; every
+	// non-blank line of the result names a file (leading/trailing whitespace
+	// trimmed) that the output is written to. The version is still printed to
+	// stdout below.
 	if *writeTo != "" {
 		rendered, err := res.renderFormat(*writeTo, *allowNonHerm)
 		if err != nil {

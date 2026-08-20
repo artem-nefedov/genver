@@ -88,3 +88,59 @@ func (r result) renderFormat(tmpl string, allowNonHermetic bool) (string, error)
 	}
 	return buf.String(), nil
 }
+
+// formatForRule is one branch-prefix -> template mapping from a single
+// --format-for flag occurrence.
+type formatForRule struct {
+	prefix   string
+	template string
+}
+
+// formatForList collects the --format-for rules from a repeatable flag. Each
+// occurrence of --format-for contributes one "prefix=template" rule, appended
+// in the order given on the command line so the FIRST rule whose prefix matches
+// the branch wins (letting a more specific prefix be listed ahead of a broader
+// one). It implements flag.Value.
+type formatForList []formatForRule
+
+// String renders the collected rules for flag's usage/error machinery.
+func (l *formatForList) String() string {
+	if l == nil || len(*l) == 0 {
+		return ""
+	}
+	parts := make([]string, len(*l))
+	for i, r := range *l {
+		parts[i] = r.prefix + "=" + r.template
+	}
+	return strings.Join(parts, ",")
+}
+
+// Set parses one "prefix=template" argument and appends it as a rule. The prefix
+// is everything before the FIRST "=", and the template is the remainder (so a
+// template may itself contain "=" characters). A missing "=", an empty prefix,
+// or an empty template is an error.
+func (l *formatForList) Set(arg string) error {
+	prefix, tmpl, ok := strings.Cut(arg, "=")
+	if !ok {
+		return fmt.Errorf("--format-for %q has no '=' separating prefix and template", arg)
+	}
+	if prefix == "" {
+		return fmt.Errorf("--format-for %q has an empty branch prefix", arg)
+	}
+	if tmpl == "" {
+		return fmt.Errorf("--format-for %q has an empty template", arg)
+	}
+	*l = append(*l, formatForRule{prefix: prefix, template: tmpl})
+	return nil
+}
+
+// matchFormatFor returns the template of the first --format-for rule whose
+// prefix the branch starts with, and whether any rule matched.
+func matchFormatFor(rules formatForList, branch string) (string, bool) {
+	for _, r := range rules {
+		if strings.HasPrefix(branch, r.prefix) {
+			return r.template, true
+		}
+	}
+	return "", false
+}

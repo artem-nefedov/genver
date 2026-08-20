@@ -592,43 +592,141 @@ func TestFormat(t *testing.T) {
 	})
 }
 
-// TestFormatFor covers --format-for, which gates --format to branches whose name
-// starts with the given prefix. On a non-matching branch the default output is
-// printed; --tag-format is never affected.
+// TestFormatFor covers --format-for, a repeatable "prefix=template" flag that
+// shapes the output per branch prefix. A matching branch (first match, in the
+// order given, wins) uses its rule's template; a non-matching branch falls back
+// to --format, or the default when --format is unset. --tag-format is never
+// affected.
 func TestFormatFor(t *testing.T) {
 	t.Parallel()
 
-	// Matching branch: --format applies.
-	t.Run("MatchApplies", func(t *testing.T) {
+	// A matching prefix uses its own template.
+	t.Run("MatchUsesRuleTemplate", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.commit("root")
 		h.newBranch("feature/x")
 		h.commit("c1")
 
-		out, err := runCapture(t, h, "--format", "out-{{.Full}}", "--format-for", "feature/")
+		out, err := runCapture(t, h, "--format-for", "feature/=feat-{{.Full}}")
 		if err != nil {
-			t.Fatalf("matching branch: err=%v", err)
+			t.Fatalf("match: err=%v", err)
 		}
-		if !strings.HasPrefix(out, "out-") {
-			t.Errorf("on matching branch --format should apply, got %q", out)
+		if !strings.HasPrefix(out, "feat-") {
+			t.Errorf("matching branch should use its rule template, got %q", out)
 		}
 	})
 
-	// Non-matching branch: --format is dropped, the default output is printed.
-	t.Run("NonMatchIgnored", func(t *testing.T) {
+	// Works with no --format at all: a non-matching branch prints the default.
+	t.Run("NonMatchDefaultWithoutFormat", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.commit("root")
 		h.newBranch("develop")
 		h.commit("d1")
 
-		out, err := runCapture(t, h, "--format", "out-{{.Full}}", "--format-for", "feature/")
+		out, err := runCapture(t, h, "--format-for", "feature/=feat-{{.Full}}")
 		if err != nil {
-			t.Fatalf("non-matching branch: err=%v", err)
+			t.Fatalf("non-match without --format: err=%v", err)
 		}
 		if out != "0.1.1-alpha.1" {
-			t.Errorf("on non-matching branch --format should be ignored, got %q, want %q", out, "0.1.1-alpha.1")
+			t.Errorf("non-matching branch should print default, got %q want %q", out, "0.1.1-alpha.1")
+		}
+	})
+
+	// With --format present, a non-matching branch falls back to --format.
+	t.Run("NonMatchFallsBackToFormat", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+
+		out, err := runCapture(t, h, "--format", "fmt-{{.Full}}", "--format-for", "feature/=feat-{{.Full}}")
+		if err != nil {
+			t.Fatalf("non-match with --format: err=%v", err)
+		}
+		if out != "fmt-0.1.1-alpha.1" {
+			t.Errorf("non-matching branch should use --format, got %q", out)
+		}
+	})
+
+	// A matching branch's rule template overrides --format.
+	t.Run("MatchOverridesFormat", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("feature/x")
+		h.commit("c1")
+
+		out, err := runCapture(t, h, "--format", "fmt-{{.Full}}", "--format-for", "feature/=feat-{{.Full}}")
+		if err != nil {
+			t.Fatalf("match overrides --format: err=%v", err)
+		}
+		if !strings.HasPrefix(out, "feat-") {
+			t.Errorf("matching rule should override --format, got %q", out)
+		}
+	})
+
+	// Multiple rules (repeated flags): the first matching prefix wins, so a more
+	// specific prefix given first takes precedence over a broader one.
+	t.Run("FirstMatchWins", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("feature/special")
+		h.commit("c1")
+
+		out, err := runCapture(t, h,
+			"--format-for", "feature/special=SPECIAL-{{.Core}}",
+			"--format-for", "feature/=feat-{{.Core}}")
+		if err != nil {
+			t.Fatalf("first-match: err=%v", err)
+		}
+		if !strings.HasPrefix(out, "SPECIAL-") {
+			t.Errorf("first matching rule should win, got %q", out)
+		}
+	})
+
+	// A later repeated flag still matches when the earlier ones do not.
+	t.Run("LaterRuleMatches", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("bugfix/y")
+		h.commit("c1")
+
+		out, err := runCapture(t, h,
+			"--format-for", "feature/=feat-{{.Core}}",
+			"--format-for", "bugfix/=bug-{{.Core}}")
+		if err != nil {
+			t.Fatalf("later-rule: err=%v", err)
+		}
+		if !strings.HasPrefix(out, "bug-") {
+			t.Errorf("later matching rule should apply, got %q", out)
+		}
+	})
+
+	// --format-for does not affect --tag-format: the tag is shaped on main even
+	// though "main" matches no rule, while stdout uses the default.
+	t.Run("DoesNotAffectTagFormat", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		head := h.commit("root") // main = 0.1.0
+
+		out, err := runCapture(t, h,
+			"--tag-main",
+			"--format-for", "feature/=feat-{{.Full}}",
+			"--tag-format", "v{{.Full}}",
+		)
+		if err != nil {
+			t.Fatalf("with --tag-format: err=%v", err)
+		}
+		if out != "0.1.0" {
+			t.Errorf("stdout = %q, want default %q", out, "0.1.0")
+		}
+		if got := localTagHash(t, h, "v0.1.0"); got != head {
+			t.Errorf("tag v0.1.0 points at %s, want HEAD %s", got, head)
 		}
 	})
 
@@ -641,76 +739,171 @@ func TestFormatFor(t *testing.T) {
 		h.commit("c1")
 		h.detachHead()
 
-		out, err := runCapture(t, h, "--branch", "feature/x", "--format", "out-{{.Full}}", "--format-for", "feature/")
+		out, err := runCapture(t, h, "--branch", "feature/x", "--format-for", "feature/=feat-{{.Full}}")
 		if err != nil {
 			t.Fatalf("branch override: err=%v", err)
 		}
-		if !strings.HasPrefix(out, "out-") {
+		if !strings.HasPrefix(out, "feat-") {
 			t.Errorf("--format-for should match the --branch override, got %q", out)
 		}
 	})
 
-	// --format-for does not affect --tag-format: the tag is shaped on main even
-	// though "main" does not match the prefix, while stdout stays the default.
-	t.Run("DoesNotAffectTagFormat", func(t *testing.T) {
+	// --write-to follows the chosen (rule) template.
+	t.Run("WriteToFollowsRule", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
-		head := h.commit("root") // main = 0.1.0
+		h.commit("root")
+		h.newBranch("feature/x")
+		h.commit("c1")
 
 		out, err := runCapture(t, h,
-			"--tag-main",
-			"--format", "out-{{.Full}}",
-			"--format-for", "feature/",
-			"--tag-format", "v{{.Full}}",
+			"--format-for", "feature/=feat-{{.Core}}",
+			"--write-to", "version.txt",
 		)
 		if err != nil {
-			t.Fatalf("with --tag-format: err=%v", err)
+			t.Fatalf("write-to rule: err=%v", err)
 		}
-		// stdout uses the default (--format gated off on "main").
-		if out != "0.1.0" {
-			t.Errorf("stdout = %q, want default %q", out, "0.1.0")
+		if !strings.HasPrefix(out, "feat-") {
+			t.Errorf("stdout = %q, want feat- prefix", out)
 		}
-		// The tag is still shaped by --tag-format.
-		if got := localTagHash(t, h, "v0.1.0"); got != head {
-			t.Errorf("tag v0.1.0 points at %s, want HEAD %s", got, head)
+		if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != out {
+			t.Errorf("write-to content = %q, want %q", got, out)
 		}
 	})
 
-	// --format-for without --format is a usage error.
-	t.Run("RequiresFormat", func(t *testing.T) {
+	// A template containing "=" is preserved (only the first "=" splits).
+	t.Run("TemplateMayContainEquals", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("feature/x")
+		h.commit("c1")
+
+		out, err := runCapture(t, h, "--format-for", `feature/=a=b-{{.Core}}`)
+		if err != nil {
+			t.Fatalf("template with '=': err=%v", err)
+		}
+		if !strings.HasPrefix(out, "a=b-") {
+			t.Errorf("template with '=' not preserved, got %q", out)
+		}
+	})
+
+	// A malformed entry (no "=") is a usage error.
+	t.Run("MalformedEntryErrors", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
 		h.commit("root")
 
 		_, _, err := runCaptureAll(t, h, "--format-for", "feature/")
 		if err == nil {
-			t.Fatal("expected error for --format-for without --format")
+			t.Fatal("expected error for entry without '='")
 		}
-		if !strings.Contains(err.Error(), "requires --format") {
+		if !strings.Contains(err.Error(), "no '='") {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
 
-	// --format-for also gates --write-to (which follows --format): a non-matching
-	// branch writes the default output.
-	t.Run("GatesWriteTo", func(t *testing.T) {
+	// An empty prefix is a usage error.
+	t.Run("EmptyPrefixErrors", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
-		h.commit("root") // main = 0.1.0
+		h.commit("root")
 
-		out, err := runCapture(t, h,
-			"--format", "out-{{.Full}}",
-			"--format-for", "feature/",
-			"--write-to", "version.txt",
-		)
-		if err != nil {
-			t.Fatalf("write-to gated: err=%v", err)
+		_, _, err := runCaptureAll(t, h, "--format-for", "=tmpl")
+		if err == nil {
+			t.Fatal("expected error for empty prefix")
 		}
-		if out != "0.1.0" {
-			t.Errorf("stdout = %q, want default %q", out, "0.1.0")
+		if !strings.Contains(err.Error(), "empty branch prefix") {
+			t.Errorf("unexpected error: %v", err)
 		}
-		if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "0.1.0" {
-			t.Errorf("write-to content = %q, want default %q", got, "0.1.0")
+	})
+
+	// An empty template is a usage error.
+	t.Run("EmptyTemplateErrors", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+
+		_, _, err := runCaptureAll(t, h, "--format-for", "feature/=")
+		if err == nil {
+			t.Fatal("expected error for empty template")
+		}
+		if !strings.Contains(err.Error(), "empty template") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+}
+
+// TestFormatForList unit-tests the repeatable --format-for flag's parsing
+// (formatForList.Set) and String rendering directly.
+func TestFormatForList(t *testing.T) {
+	t.Parallel()
+
+	t.Run("Multiple", func(t *testing.T) {
+		t.Parallel()
+		var l formatForList
+		if err := l.Set("feature/=a"); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		if err := l.Set("bugfix/=b"); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		want := formatForList{{"feature/", "a"}, {"bugfix/", "b"}}
+		if len(l) != len(want) {
+			t.Fatalf("got %d rules, want %d", len(l), len(want))
+		}
+		for i := range want {
+			if l[i] != want[i] {
+				t.Errorf("rule %d = %+v, want %+v", i, l[i], want[i])
+			}
+		}
+	})
+
+	t.Run("TemplateWithEquals", func(t *testing.T) {
+		t.Parallel()
+		var l formatForList
+		if err := l.Set("feature/=x=y=z"); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		if len(l) != 1 || l[0].prefix != "feature/" || l[0].template != "x=y=z" {
+			t.Errorf("got %+v", l)
+		}
+	})
+
+	t.Run("NoEquals", func(t *testing.T) {
+		t.Parallel()
+		var l formatForList
+		if err := l.Set("feature/"); err == nil {
+			t.Error("expected error for arg without '='")
+		}
+	})
+
+	t.Run("EmptyPrefix", func(t *testing.T) {
+		t.Parallel()
+		var l formatForList
+		if err := l.Set("=tmpl"); err == nil {
+			t.Error("expected error for empty prefix")
+		}
+	})
+
+	t.Run("EmptyTemplate", func(t *testing.T) {
+		t.Parallel()
+		var l formatForList
+		if err := l.Set("feature/="); err == nil {
+			t.Error("expected error for empty template")
+		}
+	})
+
+	t.Run("String", func(t *testing.T) {
+		t.Parallel()
+		var l formatForList
+		if got := l.String(); got != "" {
+			t.Errorf("empty String = %q, want \"\"", got)
+		}
+		_ = l.Set("feature/=a")
+		_ = l.Set("bugfix/=b")
+		if got := l.String(); got != "feature/=a,bugfix/=b" {
+			t.Errorf("String = %q", got)
 		}
 	})
 }

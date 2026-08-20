@@ -591,3 +591,126 @@ func TestFormat(t *testing.T) {
 		}
 	})
 }
+
+// TestFormatFor covers --format-for, which gates --format to branches whose name
+// starts with the given prefix. On a non-matching branch the default output is
+// printed; --tag-format is never affected.
+func TestFormatFor(t *testing.T) {
+	t.Parallel()
+
+	// Matching branch: --format applies.
+	t.Run("MatchApplies", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("feature/x")
+		h.commit("c1")
+
+		out, err := runCapture(t, h, "--format", "out-{{.Full}}", "--format-for", "feature/")
+		if err != nil {
+			t.Fatalf("matching branch: err=%v", err)
+		}
+		if !strings.HasPrefix(out, "out-") {
+			t.Errorf("on matching branch --format should apply, got %q", out)
+		}
+	})
+
+	// Non-matching branch: --format is dropped, the default output is printed.
+	t.Run("NonMatchIgnored", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("d1")
+
+		out, err := runCapture(t, h, "--format", "out-{{.Full}}", "--format-for", "feature/")
+		if err != nil {
+			t.Fatalf("non-matching branch: err=%v", err)
+		}
+		if out != "0.1.1-alpha.1" {
+			t.Errorf("on non-matching branch --format should be ignored, got %q, want %q", out, "0.1.1-alpha.1")
+		}
+	})
+
+	// The prefix is matched against the --branch override on a detached HEAD.
+	t.Run("MatchesBranchOverride", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("feature/x")
+		h.commit("c1")
+		h.detachHead()
+
+		out, err := runCapture(t, h, "--branch", "feature/x", "--format", "out-{{.Full}}", "--format-for", "feature/")
+		if err != nil {
+			t.Fatalf("branch override: err=%v", err)
+		}
+		if !strings.HasPrefix(out, "out-") {
+			t.Errorf("--format-for should match the --branch override, got %q", out)
+		}
+	})
+
+	// --format-for does not affect --tag-format: the tag is shaped on main even
+	// though "main" does not match the prefix, while stdout stays the default.
+	t.Run("DoesNotAffectTagFormat", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		head := h.commit("root") // main = 0.1.0
+
+		out, err := runCapture(t, h,
+			"--tag-main",
+			"--format", "out-{{.Full}}",
+			"--format-for", "feature/",
+			"--tag-format", "v{{.Full}}",
+		)
+		if err != nil {
+			t.Fatalf("with --tag-format: err=%v", err)
+		}
+		// stdout uses the default (--format gated off on "main").
+		if out != "0.1.0" {
+			t.Errorf("stdout = %q, want default %q", out, "0.1.0")
+		}
+		// The tag is still shaped by --tag-format.
+		if got := localTagHash(t, h, "v0.1.0"); got != head {
+			t.Errorf("tag v0.1.0 points at %s, want HEAD %s", got, head)
+		}
+	})
+
+	// --format-for without --format is a usage error.
+	t.Run("RequiresFormat", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+
+		_, _, err := runCaptureAll(t, h, "--format-for", "feature/")
+		if err == nil {
+			t.Fatal("expected error for --format-for without --format")
+		}
+		if !strings.Contains(err.Error(), "requires --format") {
+			t.Errorf("unexpected error: %v", err)
+		}
+	})
+
+	// --format-for also gates --write-to (which follows --format): a non-matching
+	// branch writes the default output.
+	t.Run("GatesWriteTo", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+
+		out, err := runCapture(t, h,
+			"--format", "out-{{.Full}}",
+			"--format-for", "feature/",
+			"--write-to", "version.txt",
+		)
+		if err != nil {
+			t.Fatalf("write-to gated: err=%v", err)
+		}
+		if out != "0.1.0" {
+			t.Errorf("stdout = %q, want default %q", out, "0.1.0")
+		}
+		if got := strings.TrimSpace(h.readWriteTo("version.txt")); got != "0.1.0" {
+			t.Errorf("write-to content = %q, want default %q", got, "0.1.0")
+		}
+	})
+}

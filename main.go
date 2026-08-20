@@ -32,6 +32,7 @@ Flags:
   --write-to <tmpl>   Also write the output (honoring --format) to one or more
                       files. The argument is a Go template like --format. Every
                       non-blank line produced is a file path (whitespace trimmed).
+  --format-for <pfx>  Only apply --format when the branch starts with <pfx>.
   --allow-nonhermetic Expose all Sprig template functions in --format/etc.,
                       including non-repeatable ones such as env, now and uuidv4.
   --branch <name>     Branch name. On a detached HEAD it supplies the branch;
@@ -67,6 +68,7 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		showHelp      = fs.Bool("help", false, "show help")
 		showVersion   = fs.Bool("version", false, "show genver version")
 		formatTmpl    = fs.String("format", "", "render the version through a Go template")
+		formatFor     = fs.String("format-for", "", "only apply --format when the branch name starts with this prefix")
 		tagFormatTmpl = fs.String("tag-format", "", "like --format, but only shapes the tag from --tag-main")
 		writeTo       = fs.String("write-to", "", "also write the output to the file(s) named by this template, one per non-blank line")
 		allowNonHerm  = fs.Bool("allow-nonhermetic", false, "expose all Sprig template functions, including non-repeatable ones (env, now, uuidv4, ...)")
@@ -104,6 +106,10 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return fmt.Errorf("--push-tag-to requires --tag-main")
 	}
 
+	if *formatFor != "" && *formatTmpl == "" {
+		return fmt.Errorf("--format-for requires --format")
+	}
+
 	if g == nil {
 		var err error
 		g, err = openRepo(".")
@@ -116,6 +122,11 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	if *formatFor != "" && !strings.HasPrefix(branch, *formatFor) {
+		*formatTmpl = ""
+	}
+
 	head, err := g.headCommit()
 	if err != nil {
 		return err

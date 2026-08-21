@@ -37,13 +37,15 @@ Change "latest" to specific release to pin the version.
 ## Differences compared to GitVersion
 
 - Self-contained statically-linked binary, doesn't rely on a runtime or other executables
-- Fast
+- Is fast
 - Just outputs the version by default
 - Can make a guess if "v" prefix needs to be added based on existing tags
 - Version is a valid OCI/Docker tag in addition to semver compliance
 - Recognizes `+semver` messages and feature branch merge messages
 - Allows overriding bump level on merge commits with `+semver` directive
 - Allows usage of pre-release "reference" tags
+- Never fetches, but still takes remotes into account
+- Never stores cache on disk, avoiding inconsistent behavior
 - Supports a few extra tricks, like formatting output and creating/pushing tags
 - Calculation logic may intentionally differ in some cases
 - Works only with the specific flow (see below)

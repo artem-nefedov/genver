@@ -3427,6 +3427,12 @@ func TestMultipleUntaggedMergesIntoMain(t *testing.T) {
 	h.newBranch("feature/x")
 	h.commit("fx1")
 	h.want("0.4.0-x.1")
+
+	// The untagged direct merges left main at 0.3.0. The subsequent develop and
+	// feature/x commits are downstream of main and must not change main's
+	// version: re-check main and confirm it is still the accumulated 0.3.0 core.
+	h.checkout("main")
+	h.want("0.3.0")
 }
 
 // TestMultipleUntaggedDevelopToMainCycles covers the develop-to-main flow (WITH
@@ -3483,6 +3489,12 @@ func TestMultipleUntaggedDevelopToMainCycles(t *testing.T) {
 	h.newBranch("feature/x")
 	h.commit("fx1")
 	h.want("0.4.0-x.1")
+
+	// The untagged release merges left main at 0.3.0. The subsequent develop and
+	// feature/x commits are downstream of main and must not change main's
+	// version: re-check main and confirm it is still the accumulated 0.3.0 core.
+	h.checkout("main")
+	h.want("0.3.0")
 }
 
 // TestUnattributedMergeBoundary covers develop-boundary discovery over an

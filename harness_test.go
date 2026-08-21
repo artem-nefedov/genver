@@ -12,6 +12,7 @@ import (
 	"github.com/go-git/go-billy/v5/memfs"
 	billyutil "github.com/go-git/go-billy/v5/util"
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/cache"
 	"github.com/go-git/go-git/v5/plumbing/format/index"
@@ -332,6 +333,82 @@ func (h *harness) deleteBranch(branch string) {
 	}
 }
 
+// addRemote registers a remote with the given name and a dummy URL, so that
+// remote-tracking refs created via remoteRef can be attributed to a configured
+// remote (branchCommit's fallback splits refs/remotes/<remote>/<branch> using
+// the configured remote names).
+func (h *harness) addRemote(name string) {
+	h.t.Helper()
+	if _, err := h.g.r.CreateRemote(&config.RemoteConfig{
+		Name: name,
+		URLs: []string{"https://example.invalid/" + name + ".git"},
+	}); err != nil {
+		h.t.Fatalf("add remote %q: %v", name, err)
+	}
+}
+
+// remoteRef creates a remote-tracking ref refs/remotes/<remote>/<branch>
+// pointing at hash, emulating the state after `git fetch` in a fresh clone or
+// CI checkout where only the checked-out branch has a local head.
+func (h *harness) remoteRef(remote, branch string, hash plumbing.Hash) {
+	h.t.Helper()
+	if err := h.g.r.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewRemoteReferenceName(remote, branch), hash),
+	); err != nil {
+		h.t.Fatalf("set remote ref %s/%s: %v", remote, branch, err)
+	}
+}
+
+// setUpstream records branch.<branch>.remote (and merge) in the repo config, as
+// `git branch --set-upstream-to` would, so the branch has a configured upstream
+// remote for reference-branch resolution.
+func (h *harness) setUpstream(branch, remote string) {
+	h.t.Helper()
+	cfg, err := h.g.r.Config()
+	if err != nil {
+		h.t.Fatalf("read config: %v", err)
+	}
+	if cfg.Branches == nil {
+		cfg.Branches = map[string]*config.Branch{}
+	}
+	cfg.Branches[branch] = &config.Branch{
+		Name:   branch,
+		Remote: remote,
+		Merge:  plumbing.NewBranchReferenceName(branch),
+	}
+	if err := h.g.r.SetConfig(cfg); err != nil {
+		h.t.Fatalf("set config: %v", err)
+	}
+}
+
+// moveToRemote converts a local branch into a remote-only tracking ref: it
+// records refs/remotes/<remote>/<branch> at the branch's current tip and then
+// deletes the local head. This reproduces a fresh clone / CI checkout where only
+// the checked-out branch has a local head and every reference branch lives under
+// refs/remotes. The branch must not be the currently checked-out branch.
+func (h *harness) moveToRemote(branch, remote string) {
+	h.t.Helper()
+	ref, err := h.g.r.Reference(plumbing.NewBranchReferenceName(branch), true)
+	if err != nil {
+		h.t.Fatalf("resolve local branch %q: %v", branch, err)
+	}
+	h.remoteRef(remote, branch, ref.Hash())
+	h.deleteBranch(branch)
+}
+
+// setLocalBranch points a local branch ref (refs/heads/<branch>) at hash,
+// creating or moving it. Used to place a local reference branch at a specific
+// commit that diverges from its remote-tracking counterpart. The branch must
+// not be the currently checked-out branch.
+func (h *harness) setLocalBranch(branch string, hash plumbing.Hash) {
+	h.t.Helper()
+	if err := h.g.r.Storer.SetReference(
+		plumbing.NewHashReference(plumbing.NewBranchReferenceName(branch), hash),
+	); err != nil {
+		h.t.Fatalf("set local branch %s: %v", branch, err)
+	}
+}
+
 // want asserts genver's output for the current branch equals expect.
 func (h *harness) want(expect string) {
 	h.t.Helper()
@@ -348,6 +425,7 @@ func (h *harness) version() string {
 	if err != nil {
 		h.t.Fatalf("headBranch: %v", err)
 	}
+	h.g.setPreferredRemoteFor(branch)
 	head, err := h.g.headCommit()
 	if err != nil {
 		h.t.Fatalf("headCommit: %v", err)

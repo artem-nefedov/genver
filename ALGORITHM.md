@@ -30,6 +30,17 @@ More technical details on how it works.
 - On feature/ (or feat/) branches we should see minor increment, which takes precedence over patch increment
 - Version on develop shows what the future release version will be, but if we have no new commits it should not change
 
+## Resolving reference branches (local vs remote)
+
+The reference branches the algorithm consults — `main`/`master` and `develop` — are resolved as follows (this only affects those refs; HEAD is always used as-is):
+
+- Only a local branch exists: use it.
+- Only a remote-tracking ref exists (the fresh-clone / CI layout, where just the checked-out branch has a local head): use the remote. The remote configured as the upstream of the branch being computed (`branch.<branch>.remote`) is preferred, then `origin`, then a unique match across remotes; matching several remotes is an error (ambiguous).
+- Both exist: the REMOTE wins, but only when the local head is not ahead of it (every local commit is reachable from the remote tip) AND they share a common merge base — this adopts a more up-to-date remote when local merely lags. If local has commits the remote lacks (local is ahead or diverged), or the histories are unrelated (no merge base), the LOCAL head wins, so local work is never silently discarded.
+- For the permanent release branch, the NAME preference (`main` over `master`) is applied first, and only then is each name resolved local-or-remote. So `main` (whether local or a remote-tracking ref) is chosen before `master` is ever consulted — e.g. a remote-only `main` wins over a local `master`.
+
+Every resolution decision is reported under `--debug`.
+
 ## Example
 
 - last commit on main is tagged as "2.1.0"; running genver on main outputs "2.1.0"

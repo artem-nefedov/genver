@@ -122,6 +122,19 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return err
 	}
 
+	var trace io.Writer
+	if *debug {
+		trace = errOut
+	}
+	// Share the debug sink with the repo so reference-branch resolution
+	// (local vs remote-tracking ref) is traced alongside calculation steps.
+	g.trace = trace
+
+	// Reference branches (main/master/develop) that exist only as
+	// remote-tracking refs are resolved against this branch's configured
+	// upstream remote first, so multi-remote clones stay consistent.
+	g.setPreferredRemoteFor(branch)
+
 	var effectiveFormat string
 	if tmpl, ok := matchFormatFor(formatForRules, branch); ok {
 		effectiveFormat = tmpl
@@ -134,10 +147,6 @@ func runWithRepo(g *repo, args []string, out, errOut io.Writer) error {
 		return err
 	}
 
-	var trace io.Writer
-	if *debug {
-		trace = errOut
-	}
 	calc, err := newCalculatorTrace(g, trace)
 	if err != nil {
 		return err

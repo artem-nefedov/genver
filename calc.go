@@ -106,11 +106,18 @@ func newCalculatorTrace(g *repo, trace io.Writer) (*calculator, error) {
 // logf writes a trace line if tracing is enabled. It is a no-op otherwise.
 // Each line is prefixed with a wall-clock timestamp at millisecond precision.
 func (c *calculator) logf(format string, args ...any) {
-	if c.trace == nil {
+	tracef(c.trace, format, args...)
+}
+
+// tracef writes a single timestamped trace line to w (a no-op when w is nil).
+// It is the shared sink for both calculator and repo tracing, so debug output
+// has a uniform format regardless of which layer emitted it.
+func tracef(w io.Writer, format string, args ...any) {
+	if w == nil {
 		return
 	}
 	ts := time.Now().Format("2006-01-02 15:04:05.000000000")
-	fmt.Fprintf(c.trace, ts+": "+format+"\n", args...)
+	fmt.Fprintf(w, ts+": "+format+"\n", args...)
 }
 
 // short renders an abbreviated commit hash for readable trace output.

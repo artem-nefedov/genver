@@ -2,10 +2,12 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -43,6 +45,26 @@ type repo struct {
 	r     *git.Repository
 	out   fileWriter          // persists --write-to output
 	store *filesystem.Storage // non-nil when descriptors are kept open (needs Close)
+
+	// preferredRemote is the remote whose tracking refs are consulted first when
+	// a reference branch (main/master/develop) has no local head. It is the
+	// upstream remote configured for the branch genver is computing a version
+	// for (branch.<branch>.remote), so multi-remote clones resolve reference
+	// branches against the same remote as the branch under calculation. Empty
+	// when the branch has no configured upstream, in which case resolution falls
+	// back to "origin" and then a unique match across remotes.
+	preferredRemote string
+
+	// trace, when non-nil, receives timestamped debug lines describing how
+	// reference branches are resolved (local vs remote-tracking ref, and why).
+	// It shares the calculator's --debug sink so all trace output is unified.
+	trace io.Writer
+}
+
+// logf writes a timestamped trace line when tracing is enabled (a no-op
+// otherwise), using the same format as the calculator's trace.
+func (g *repo) logf(format string, args ...any) {
+	tracef(g.trace, format, args...)
 }
 
 // Close releases any resources held by the repo. When the storage keeps file
@@ -153,17 +175,219 @@ func (g *repo) headCommit() (*object.Commit, error) {
 	return g.r.CommitObject(h.Hash())
 }
 
-// branchCommit resolves a local branch name to its tip commit, or (nil, nil) if
-// the branch does not exist.
-func (g *repo) branchCommit(name string) (*object.Commit, error) {
-	ref, err := g.r.Reference(plumbing.NewBranchReferenceName(name), true)
+// branchUpstreamRemote returns the remote configured as branch's upstream
+// (branch.<branch>.remote in git config), or "" when the branch has no
+// configured upstream. This is the remote genver prefers when resolving
+// reference branches that exist only as remote-tracking refs.
+func (g *repo) branchUpstreamRemote(branch string) string {
+	cfg, err := g.r.Config()
 	if err != nil {
-		if err == plumbing.ErrReferenceNotFound {
-			return nil, nil
-		}
+		return ""
+	}
+	b, ok := cfg.Branches[branch]
+	if !ok || b == nil {
+		return ""
+	}
+	return b.Remote
+}
+
+// setPreferredRemoteFor records, as the preferred remote for later reference-
+// branch resolution, the upstream remote of the branch genver is computing a
+// version for. A no-op (leaves preferredRemote empty) when the branch has no
+// configured upstream.
+func (g *repo) setPreferredRemoteFor(branch string) {
+	g.preferredRemote = g.branchUpstreamRemote(branch)
+}
+
+// branchCommit resolves a reference branch name to its tip commit, or (nil, nil)
+// if the branch cannot be found.
+//
+// Resolution reconciles the local head (refs/heads/<name>) with the
+// remote-tracking ref (refs/remotes/<remote>/<name>):
+//
+//   - Only a local head exists: use it.
+//   - Only a remote-tracking ref exists (the fresh-clone / CI layout, where just
+//     the checked-out branch has a local head): use the remote. The upstream
+//     remote of the branch under calculation is preferred, then "origin", then a
+//     unique match across remotes (see remoteBranchCommit).
+//   - Both exist: the REMOTE wins, but only when the local head is not ahead of
+//     it (every local commit is reachable from the remote tip) AND the two share
+//     a common merge base. This adopts the more up-to-date remote when local is
+//     merely behind-or-equal. If the local head has commits the remote lacks
+//     (local ahead or diverged), or the histories are unrelated (no merge base),
+//     the LOCAL head wins, so local work is never silently discarded.
+func (g *repo) branchCommit(name string) (*object.Commit, error) {
+	localRef, err := g.r.Reference(plumbing.NewBranchReferenceName(name), true)
+	switch {
+	case err == nil:
+		// Local head exists; fall through to reconcile with any remote below.
+	case err == plumbing.ErrReferenceNotFound:
+		// No local head: use the remote-tracking fallback.
+		return g.remoteBranchCommit(name)
+	default:
 		return nil, fmt.Errorf("resolve branch %q: %w", name, err)
 	}
-	return g.r.CommitObject(ref.Hash())
+
+	local, err := g.r.CommitObject(localRef.Hash())
+	if err != nil {
+		return nil, err
+	}
+
+	remote, err := g.remoteBranchCommit(name)
+	if err != nil {
+		return nil, err
+	}
+	if remote == nil {
+		// No remote-tracking ref: local is the only source.
+		g.logf("resolve branch %q: local %s (no remote-tracking ref)", name, short(local.Hash))
+		return local, nil
+	}
+
+	prefer, reason, err := g.preferRemoteOverLocal(local, remote)
+	if err != nil {
+		return nil, err
+	}
+	if prefer {
+		g.logf("resolve branch %q: remote %s wins over local %s (%s)",
+			name, short(remote.Hash), short(local.Hash), reason)
+		return remote, nil
+	}
+	g.logf("resolve branch %q: local %s wins over remote %s (%s)",
+		name, short(local.Hash), short(remote.Hash), reason)
+	return local, nil
+}
+
+// preferRemoteOverLocal reports whether the remote tip should be used in place
+// of the local tip for a reference branch present in both, along with a short
+// human-readable reason for the decision (for --debug tracing). The remote wins
+// only when local is not ahead of remote (local is an ancestor of, or equal to,
+// remote) and the two share a common merge base; otherwise local wins.
+func (g *repo) preferRemoteOverLocal(local, remote *object.Commit) (bool, string, error) {
+	if local.Hash == remote.Hash {
+		return true, "local and remote point at the same commit", nil
+	}
+	// A common merge base is required (related histories). Unrelated histories
+	// -> keep local.
+	bases, err := local.MergeBase(remote)
+	if err != nil {
+		return false, "", fmt.Errorf("compute merge-base of local and remote: %w", err)
+	}
+	if len(bases) == 0 {
+		return false, "unrelated histories: no common merge base", nil
+	}
+	// Local must have no commits absent from remote: local is an ancestor of
+	// remote. (Equality is handled above.)
+	localBehind, err := local.IsAncestor(remote)
+	if err != nil {
+		return false, "", fmt.Errorf("compare local and remote ancestry: %w", err)
+	}
+	if localBehind {
+		return true, "local is behind remote (all local commits are in remote) with a common base", nil
+	}
+	return false, "local has commits not in remote (local is ahead or diverged)", nil
+}
+
+// remoteBranchCommit resolves a branch name against remote-tracking refs
+// (refs/remotes/<remote>/<name>), returning (nil, nil) when no remote carries
+// the branch. The upstream remote of the branch under calculation
+// (preferredRemote) wins first, then "origin"; otherwise the branch must be
+// carried by exactly one remote, else the name is ambiguous.
+func (g *repo) remoteBranchCommit(name string) (*object.Commit, error) {
+	// Try the explicitly preferred remotes in order: the branch-under-
+	// calculation's configured upstream first (when set), then "origin". The
+	// first that carries the branch wins outright — no ambiguity check, since
+	// the choice is deliberate.
+	for _, remote := range []string{g.preferredRemote, "origin"} {
+		if remote == "" {
+			continue
+		}
+		c, err := g.r.Reference(plumbing.NewRemoteReferenceName(remote, name), true)
+		if err == nil {
+			kind := "origin"
+			if remote == g.preferredRemote {
+				kind = "preferred upstream"
+			}
+			commit, cerr := g.r.CommitObject(c.Hash())
+			if cerr != nil {
+				return nil, cerr
+			}
+			g.logf("remote resolve %q: matched %s/%s (%s) at %s", name, remote, name, kind, short(commit.Hash))
+			return commit, nil
+		}
+		if err != plumbing.ErrReferenceNotFound {
+			return nil, fmt.Errorf("resolve remote branch %q: %w", remote+"/"+name, err)
+		}
+	}
+
+	// No preferred/origin match: scan every remote-tracking ref for a unique
+	// match. A remote-tracking ref has the form refs/remotes/<remote>/<branch>,
+	// where <branch> may itself contain slashes (e.g. "feature/x"). To split off
+	// the remote segment reliably, match against the configured remote names
+	// rather than guessing on slashes.
+	remoteNames, err := g.remoteNames()
+	if err != nil {
+		return nil, err
+	}
+	refs, err := g.r.References()
+	if err != nil {
+		return nil, fmt.Errorf("list references: %w", err)
+	}
+	defer refs.Close()
+
+	found := map[string]plumbing.Hash{} // remote name -> tip hash
+	if err := refs.ForEach(func(ref *plumbing.Reference) error {
+		if !ref.Name().IsRemote() || ref.Type() == plumbing.SymbolicReference {
+			// Skip non-remote refs and symbolic refs like
+			// refs/remotes/origin/HEAD.
+			return nil
+		}
+		for _, remote := range remoteNames {
+			if ref.Name() == plumbing.NewRemoteReferenceName(remote, name) {
+				found[remote] = ref.Hash()
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("scan remote branches for %q: %w", name, err)
+	}
+
+	switch len(found) {
+	case 0:
+		g.logf("remote resolve %q: no local head and no remote-tracking ref found", name)
+		return nil, nil
+	case 1:
+		for remote, h := range found {
+			commit, err := g.r.CommitObject(h)
+			if err != nil {
+				return nil, err
+			}
+			g.logf("remote resolve %q: matched unique remote %s/%s at %s", name, remote, name, short(commit.Hash))
+			return commit, nil
+		}
+	}
+	labels := make([]string, 0, len(found))
+	for r := range found {
+		labels = append(labels, r+"/"+name)
+	}
+	sort.Strings(labels)
+	return nil, fmt.Errorf(
+		"branch %q is ambiguous: found on multiple remotes (%s); no local branch or origin/%s to disambiguate",
+		name, strings.Join(labels, ", "), name)
+}
+
+// remoteNames returns the configured remote names, used to split a
+// remote-tracking ref (refs/remotes/<remote>/<branch>) into its remote and
+// branch segments when the branch name itself may contain slashes.
+func (g *repo) remoteNames() ([]string, error) {
+	remotes, err := g.r.Remotes()
+	if err != nil {
+		return nil, fmt.Errorf("list remotes: %w", err)
+	}
+	names := make([]string, 0, len(remotes))
+	for _, rem := range remotes {
+		names = append(names, rem.Config().Name)
+	}
+	return names, nil
 }
 
 // mainBranch finds the permanent release branch, preferring "main" over

@@ -3,13 +3,16 @@ BINARY := genver
 VERSION ?= $(shell go run . --format='v{{.Core}}-{{substr 0 7 .HeadHash}}' 2>/dev/null)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: build install fix test clean release-preview
+.PHONY: build install uninstall fix test clean release-preview
 
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o $(BINARY) .
 
 install:
 	CGO_ENABLED=0 go install -trimpath -ldflags '$(LDFLAGS)' .
+
+uninstall:
+	rm -f $$(go env GOBIN)/genver
 
 fix:
 	go fmt ./...

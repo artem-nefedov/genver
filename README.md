@@ -41,7 +41,7 @@ Change "latest" to specific release to pin the version.
 - Just outputs the version by default
 - Can make a guess if "v" prefix needs to be added based on existing tags
 - Version is a valid OCI/Docker tag in addition to semver compliance
-- Recognizes `+semver` messages and feature branch merge messages (git native, GitHub PR, Bitbucket Server PR)
+- Recognizes `+semver` messages and feature branch merge messages (native, GitHub, Bitbucket Server)
 - Allows overriding bump level on merge commits with `+semver` directive
 - Allows usage of pre-release "reference" tags
 - Never fetches, but still takes remotes into account

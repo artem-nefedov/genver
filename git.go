@@ -614,12 +614,33 @@ var mergePRRe = regexp.MustCompile(`Merge pull request #\d+ from (\S+)`)
 // first slash, e.g. "feature/cool-abc".
 var mergeRemoteRe = regexp.MustCompile(`Merge remote-tracking branch '([^']+)'`)
 
+// mergeBitbucketServerRe extracts the merged branch from a Bitbucket Server
+// (formerly Stash / Data Center) pull-request merge commit message. This is
+// specific to Bitbucket Server: Bitbucket Cloud writes a different message and
+// is NOT matched here. Bitbucket Server writes a two-line message where the
+// subject is "Pull request #<n>: <title>" and the body carries the actual refs,
+// e.g.
+//
+//	Pull request #123: ABC-1234 my cool feature
+//
+//	Merge in PROJECT/repo from feature/cool-abc to develop
+//
+// The whole shape is matched (subject line included) so a stray "Merge in ..."
+// body without the Bitbucket Server "Pull request #<n>:" subject is not
+// mistaken for this format. The captured group is the SOURCE branch verbatim
+// (already unprefixed, e.g. "feature/cool-abc"). Branch names cannot contain
+// whitespace, so the source, target, and project/repo tokens are each matched
+// as runs of non-space characters. "(?s)" lets "." span the blank line between
+// subject and body, and "\A" anchors the subject at the start of the message.
+var mergeBitbucketServerRe = regexp.MustCompile(`(?s)\APull request #\d+:.*?\bMerge in \S+ from (\S+) to \S+`)
+
 // mergedBranchName returns the name of the branch merged by commit c, or "" if
-// c is not a recognized merge commit. The git-standard, GitHub PR, and
-// remote-tracking merge message formats are all supported (short-lived branches
-// are deleted, so the message is the only surviving trace of the merged branch
-// name). The owner/remote prefix, when present, is stripped, e.g.
-// "origin/feature/x" and "owner/feature/x" both yield "feature/x".
+// c is not a recognized merge commit. The git-standard, GitHub PR, Bitbucket
+// Server PR, and remote-tracking merge message formats are all supported
+// (short-lived branches are deleted, so the message is the only surviving trace
+// of the merged branch name). The owner/remote prefix, when present, is
+// stripped, e.g. "origin/feature/x" and "owner/feature/x" both yield
+// "feature/x".
 func mergedBranchName(c *object.Commit) string {
 	if c.NumParents() < 2 {
 		return ""
@@ -641,6 +662,11 @@ func mergedBranchName(c *object.Commit) string {
 		if _, branch, ok := strings.Cut(m[1], "/"); ok {
 			return branch
 		}
+	}
+	// Bitbucket Server's "Merge in <project>/<repo> from <source> to <target>"
+	// body carries the source branch verbatim (no owner/remote prefix to strip).
+	if m := mergeBitbucketServerRe.FindStringSubmatch(c.Message); m != nil {
+		return m[1]
 	}
 	return ""
 }

@@ -204,6 +204,16 @@ func (h *harness) mergeRemote(from, remote string) plumbing.Hash {
 	return h.mergeMsg(from, msg)
 }
 
+// mergeBitbucketServer performs a merge of `from` using a Bitbucket Server
+// (formerly Stash / Data Center) pull-request merge commit message, whose
+// subject is "Pull request #<n>: <title>" and whose body carries the
+// source/target refs, e.g. "Merge in PROJECT/repo from feature/foo to develop".
+func (h *harness) mergeBitbucketServer(from string, prNumber int, title, project, target string) plumbing.Hash {
+	msg := fmt.Sprintf("Pull request #%d: %s\n\nMerge in %s from %s to %s",
+		prNumber, title, project, from, target)
+	return h.mergeMsg(from, msg)
+}
+
 // mergeMsg performs a non-fast-forward merge of `from` into the current branch
 // by constructing a merge commit with two parents (go-git has no high-level
 // merge), using the given commit message.

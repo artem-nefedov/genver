@@ -2862,6 +2862,48 @@ func TestFeatureMergeMessageFormats(t *testing.T) {
 		h.mergePR("bugfix/ABC-9", 8, "acme-org")
 		h.want("0.1.1-alpha.2") // bugfix -> patch bump only, not minor
 	})
+
+	t.Run("BitbucketServer", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.newBranch("feature/cool-abc")
+		h.commit("f1")
+		h.checkout("develop")
+		// Subject "Pull request #7: nice feature" plus body
+		// "Merge in PROJECT/repo from feature/cool-abc to develop".
+		h.mergeBitbucketServer("feature/cool-abc", 7, "nice feature", "PROJECT/repo", "develop")
+		h.want("0.2.0-alpha.2") // same minor bump, Bitbucket Server-style message
+	})
+
+	t.Run("BitbucketServerNonFeature", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.newBranch("bugfix/ABC-9")
+		h.commit("b1")
+		h.checkout("develop")
+		h.mergeBitbucketServer("bugfix/ABC-9", 8, "a fix", "PROJECT/repo", "develop")
+		h.want("0.1.1-alpha.2") // bugfix -> patch bump only, not minor
+	})
+
+	t.Run("BitbucketServerBodyWithoutSubjectNotRecognized", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.newBranch("feature/cool-abc")
+		h.commit("f1")
+		h.checkout("develop")
+		// A "Merge in ... from feature/... to develop" body WITHOUT the
+		// Bitbucket Server "Pull request #<n>:" subject must not be attributed
+		// as a feature merge: it falls back to an unattributed merge (patch
+		// floor), not a minor bump.
+		h.mergeMsg("feature/cool-abc", "Merge in PROJECT/repo from feature/cool-abc to develop")
+		h.want("0.1.1-alpha.2")
+	})
 }
 
 // TestReleaseMergeMessageSemver verifies that a "+semver:" directive in the

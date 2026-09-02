@@ -764,9 +764,11 @@ func TestMasterBranch(t *testing.T) {
 	// section below the fork point, which still contained the feature merge, and
 	// re-applied its minor bump on top of 0.2.0, wrongly yielding 0.3.0. Checked
 	// for both permanent-branch names ("master" and "main").
-	for _, tc := range []struct{ name, mainName string }{
-		{"BranchForksFromDirectFeatureMergeMaster", "master"},
-		{"BranchForksFromDirectFeatureMergeMain", "main"},
+	for _, tc := range []struct{ name, mainName, mergeMsg string }{
+		{"BranchForksFromDirectFeatureMergeMaster", "master", ""},
+		{"BranchForksFromDirectFeatureMergeMain", "main", ""},
+		{"BranchForksFromDirectFeatureMergeMasterWithMsg", "master", "+semver:minor"},
+		{"BranchForksFromDirectFeatureMergeMainWithMsg", "main", "+semver:minor"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -777,7 +779,13 @@ func TestMasterBranch(t *testing.T) {
 			h.newBranch("feature/cool")
 			h.commit("f1")
 			h.checkout(tc.mainName)
-			h.merge("feature/cool")
+
+			if tc.mergeMsg != "" {
+				h.mergeMsg("feature/cool", tc.mergeMsg)
+			} else {
+				h.merge("feature/cool")
+			}
+
 			h.want("0.2.0")
 
 			// Fork a non-feature branch from that merge commit and add a commit.

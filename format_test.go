@@ -218,6 +218,80 @@ func TestWriteToMultipleFiles(t *testing.T) {
 	}
 }
 
+// TestWriteToTemplateExpandsToMultipleFiles: the --write-to argument is a
+// single line on the command line, but its template renders to multiple lines,
+// each of which names a file. This verifies the multi-file split happens on the
+// rendered result (not the raw argument), so a template that emits newlines
+// fans out to several files. Empty and whitespace-only rendered lines are
+// ignored, exactly as with a literal multi-line argument.
+func TestWriteToTemplateExpandsToMultipleFiles(t *testing.T) {
+	t.Parallel()
+
+	// A range emitting a newline after each path: the raw argument has no
+	// newlines, yet it renders to several lines. Interleaved among the real
+	// paths are a fully empty line and a whitespace-only line, both of which
+	// must be skipped so only the three real files are written.
+	t.Run("RangeEmitsNewlines", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+
+		// Renders to (with \n shown): "a-0.1.0.txt\n\nb-0.1.0.txt\n   \nc-0.1.0.txt\n"
+		// i.e. a blank line after "a" and a whitespace-only line after "b".
+		arg := `{{range list "a" "" "b" "   " "c"}}{{if eq . ""}}{{else if eq . "   "}}   {{else}}{{.}}-{{$.Core}}.txt{{end}}{{"\n"}}{{end}}`
+		out, err := runCapture(t, h, "--format", "v{{.Full}}", "--write-to", arg)
+		if err != nil || out != "v0.1.0" {
+			t.Fatalf("--write-to range: out=%q err=%v", out, err)
+		}
+
+		for _, name := range []string{"a-0.1.0.txt", "b-0.1.0.txt", "c-0.1.0.txt"} {
+			if got := strings.TrimSpace(h.readWriteTo(name)); got != "v0.1.0" {
+				t.Errorf("write-to %q content = %q, want %q", name, got, "v0.1.0")
+			}
+		}
+		// Exactly three files: the empty and whitespace-only lines were skipped.
+		if got := writeToFileCount(t, h, "/"); got != 3 {
+			t.Errorf("root file count = %d, want 3", got)
+		}
+		// Directly assert the whitespace-only line produced no entry under its
+		// raw (untrimmed) name.
+		if writeToExists(t, h, "   ") {
+			t.Errorf(`whitespace-only line created an entry at "   ", want none`)
+		}
+	})
+
+	// A list joined with a newline: the single-line argument becomes several
+	// lines including an empty entry and a whitespace-only entry, both of which
+	// are ignored, leaving two files.
+	t.Run("JoinWithNewline", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // main = 0.1.0
+
+		// Renders to: "x-0.1.0.txt\n\ny-0.1.0.txt\n \t "
+		arg := `{{ list (printf "x-%s.txt" .Core) "" (printf "y-%s.txt" .Core) " \t " | join "\n" }}`
+		out, err := runCapture(t, h, "--write-to", arg)
+		if err != nil || out != "0.1.0" {
+			t.Fatalf("--write-to join: out=%q err=%v", out, err)
+		}
+
+		for _, name := range []string{"x-0.1.0.txt", "y-0.1.0.txt"} {
+			if got := strings.TrimSpace(h.readWriteTo(name)); got != "0.1.0" {
+				t.Errorf("write-to %q content = %q, want %q", name, got, "0.1.0")
+			}
+		}
+		// Only two files: the empty and whitespace-only entries were skipped.
+		if got := writeToFileCount(t, h, "/"); got != 2 {
+			t.Errorf("root file count = %d, want 2", got)
+		}
+		// Directly assert the whitespace-only entry produced no file under its
+		// raw (untrimmed) name.
+		if writeToExists(t, h, " \t ") {
+			t.Errorf(`whitespace-only entry created an entry at " \t ", want none`)
+		}
+	})
+}
+
 // TestWriteToDuplicatePaths: when the rendered --write-to argument names the
 // same file on two lines, the file is written twice (an idempotent overwrite),
 // producing a single file with the expected content and no error.

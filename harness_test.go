@@ -513,6 +513,17 @@ func localTagHash(t *testing.T, h *harness, tag string) plumbing.Hash {
 	return ref.Hash()
 }
 
+// writeToExists reports whether --write-to persisted anything (file or dir) at
+// name in the harness's in-memory filesystem. Unlike readWriteTo it does not
+// fail the test when the entry is absent, so it can assert non-existence.
+func writeToExists(t *testing.T, h *harness, name string) bool {
+	t.Helper()
+	if _, err := h.wfs.Stat(name); err == nil {
+		return true
+	}
+	return false
+}
+
 // writeToFileCount returns how many regular files --write-to persisted directly
 // in dir (subdirectories are counted as one entry, not recursed).
 func writeToFileCount(t *testing.T, h *harness, dir string) int {

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/go-git/go-git/v5/plumbing"
 )
 
 // TestWorkflowWithCrossMerges builds a repository through the full workflow
@@ -763,12 +765,20 @@ func TestMasterBranch(t *testing.T) {
 	// branch adds a patch, giving 0.2.1. Previously genver re-scanned the
 	// section below the fork point, which still contained the feature merge, and
 	// re-applied its minor bump on top of 0.2.0, wrongly yielding 0.3.0. Checked
-	// for both permanent-branch names ("master" and "main").
-	for _, tc := range []struct{ name, mainName, mergeMsg string }{
-		{"BranchForksFromDirectFeatureMergeMaster", "master", ""},
-		{"BranchForksFromDirectFeatureMergeMain", "main", ""},
-		{"BranchForksFromDirectFeatureMergeMasterWithMsg", "master", "+semver:minor"},
-		{"BranchForksFromDirectFeatureMergeMainWithMsg", "main", "+semver:minor"},
+	// for both permanent-branch names ("master" and "main"), and for the
+	// v-prefixed variant where the fork-point merge carries a "v"-prefixed
+	// release tag: the branch must inherit that "v" spelling by default (the
+	// boundary's v-prefix flag is carried through the release-merge fork point).
+	for _, tc := range []struct {
+		name, mainName, mergeMsg string
+		vPrefix                  bool
+	}{
+		{"BranchForksFromDirectFeatureMergeMaster", "master", "", false},
+		{"BranchForksFromDirectFeatureMergeMain", "main", "", false},
+		{"BranchForksFromDirectFeatureMergeMasterWithMsg", "master", "+semver:minor", false},
+		{"BranchForksFromDirectFeatureMergeMainWithMsg", "main", "+semver:minor", false},
+		{"BranchForksFromDirectFeatureMergeMasterVPrefix", "master", "", true},
+		{"BranchForksFromDirectFeatureMergeMainVPrefix", "main", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -780,18 +790,50 @@ func TestMasterBranch(t *testing.T) {
 			h.commit("f1")
 			h.checkout(tc.mainName)
 
+			var mg plumbing.Hash
 			if tc.mergeMsg != "" {
-				h.mergeMsg("feature/cool", tc.mergeMsg)
+				mg = h.mergeMsg("feature/cool", tc.mergeMsg)
 			} else {
-				h.merge("feature/cool")
+				mg = h.merge("feature/cool")
 			}
 
+			// A "v"-prefixed release tag on the merge (the fork point) makes the
+			// resulting boundary v-prefixed, which the forked branch inherits.
+			if tc.vPrefix {
+				h.tag("v0.2.0", mg)
+			}
+			// h.want checks the raw computed core (the "v" prefix is a rendering
+			// concern applied by the default-format layer, not part of the core),
+			// so it is bare here regardless of the tag spelling. The rendered
+			// output, which does carry the inherited "v", is asserted separately.
 			h.want("0.2.0")
+			// The default output spelling follows the boundary: v-prefixed when
+			// the fork point was v-tagged, bare otherwise.
+			wantRelease := "0.2.0"
+			if tc.vPrefix {
+				wantRelease = "v0.2.0"
+			}
+			if out, err := runCapture(t, h); err != nil {
+				t.Fatalf("runCapture on %s: %v", tc.mainName, err)
+			} else if out != wantRelease {
+				t.Errorf("release on %s: got %q, want %q", tc.mainName, out, wantRelease)
+			}
 
 			// Fork a non-feature branch from that merge commit and add a commit.
 			h.newBranch("misc/ABC-1")
 			h.commit("m1")
 			h.want("0.2.1-ABC-1.1") // builds on 0.2.0 + one patch, NOT 0.3.0
+
+			// The forked branch inherits the boundary's spelling too.
+			wantBranch := "0.2.1-ABC-1.1"
+			if tc.vPrefix {
+				wantBranch = "v0.2.1-ABC-1.1"
+			}
+			if out, err := runCapture(t, h); err != nil {
+				t.Fatalf("runCapture on misc/ABC-1: %v", err)
+			} else if out != wantBranch {
+				t.Errorf("fork point spelling: got %q, want %q", out, wantBranch)
+			}
 		})
 	}
 }

@@ -275,6 +275,31 @@ func (c *calculator) isBoundary(x *object.Commit) (core, bool) {
 	return c.boundaries[i].core, true
 }
 
+// mergeBoundary reports the release core a merge commit produced, if x is a
+// merge whose boundary was registered at its released tip (its second parent),
+// as developBoundaries does for every merge on the mainline. This is distinct
+// from isBoundary, which only recognizes the boundary commit itself: a merge
+// commit is never its own boundary (the boundary sits on its second parent), so
+// a branch that forks directly from such a merge would otherwise fail to see
+// that the merge's core is already established and would re-apply the merge's
+// bump on top of it. It also reports whether that boundary's tag is
+// "v"-prefixed, mirroring boundaryVPrefixAt.
+func (c *calculator) mergeBoundary(x *object.Commit) (core, bool, bool, error) {
+	if x.NumParents() < 2 {
+		return core{}, false, false, nil
+	}
+	p, err := x.Parent(1)
+	if err != nil {
+		return core{}, false, false, err
+	}
+	i, ok := c.boundaryAt[p.Hash]
+	if !ok {
+		return core{}, false, false, nil
+	}
+	b := &c.boundaries[i]
+	return b.core, true, b.vPrefix, nil
+}
+
 // boundaryConflictAt returns the ambiguity error for the boundary at commit hash
 // h, if that boundary came from an ambiguous tagged commit. Used when a boundary
 // commit is selected directly (e.g. develop HEAD is itself a boundary).
@@ -1148,6 +1173,16 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 		belowCore = bcore
 		baseVPrefix = c.boundaryVPrefixAt(mb.Hash)
 		c.logf("other: fork point is a release boundary (%s); %s section bump = none", bcore, integration)
+	} else if mcore, ok, mvpre, err := c.mergeBoundary(mb); err != nil {
+		return core{}, "", 0, false, err
+	} else if ok {
+		// The fork point is a release merge on the mainline. Its resulting core
+		// is already established (registered at its second parent), so the branch
+		// builds straight on that core: re-scanning the section here would
+		// wrongly re-apply the merge's own bump on top of the core it produced.
+		belowCore = mcore
+		baseVPrefix = mvpre
+		c.logf("other: fork point is a release merge (%s); %s section bump = none", mcore, integration)
 	} else {
 		scan, err := c.scanSectionInPool(mb.Hash, false, pool)
 		if err != nil {

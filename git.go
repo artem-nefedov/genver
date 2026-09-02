@@ -601,11 +601,11 @@ func ancestorHashesIn(start plumbing.Hash, pool map[plumbing.Hash][]plumbing.Has
 // name is the branch ref, e.g. "feature/cool-abc".
 var mergeBranchRe = regexp.MustCompile(`Merge branch '([^']+)'`)
 
-// mergePRRe extracts the merged branch from a GitHub pull-request merge commit
-// message, e.g. "Merge pull request #42 from owner/feature/cool-abc". The
-// captured ref is "<owner>/<branch>", so the branch is everything after the
+// mergeGitHubPRRe extracts the merged branch from a GitHub pull-request merge
+// commit message, e.g. "Merge pull request #42 from owner/feature/cool-abc".
+// The captured ref is "<owner>/<branch>", so the branch is everything after the
 // first slash, e.g. "feature/cool-abc".
-var mergePRRe = regexp.MustCompile(`Merge pull request #\d+ from (\S+)`)
+var mergeGitHubPRRe = regexp.MustCompile(`Merge pull request #\d+ from (\S+)`)
 
 // mergeRemoteRe extracts the merged branch from a merge of a remote-tracking
 // ref, the message git writes when a fetched branch is merged directly, e.g.
@@ -614,7 +614,7 @@ var mergePRRe = regexp.MustCompile(`Merge pull request #\d+ from (\S+)`)
 // first slash, e.g. "feature/cool-abc".
 var mergeRemoteRe = regexp.MustCompile(`Merge remote-tracking branch '([^']+)'`)
 
-// mergeBitbucketServerRe extracts the merged branch from a Bitbucket Server
+// mergeBitbucketServerPRRe extracts the merged branch from a Bitbucket Server
 // (formerly Stash / Data Center) pull-request merge commit message. This is
 // specific to Bitbucket Server: Bitbucket Cloud writes a different message and
 // is NOT matched here. Bitbucket Server writes a two-line message where the
@@ -632,7 +632,7 @@ var mergeRemoteRe = regexp.MustCompile(`Merge remote-tracking branch '([^']+)'`)
 // whitespace, so the source, target, and project/repo tokens are each matched
 // as runs of non-space characters. "(?s)" lets "." span the blank line between
 // subject and body, and "\A" anchors the subject at the start of the message.
-var mergeBitbucketServerRe = regexp.MustCompile(`(?s)\APull request #\d+:.*?\bMerge in \S+ from (\S+) to \S+`)
+var mergeBitbucketServerPRRe = regexp.MustCompile(`(?s)\APull request #\d+:.*?\bMerge in \S+ from (\S+) to \S+`)
 
 // mergedBranchName returns the name of the branch merged by commit c, or "" if
 // c is not a recognized merge commit. The git-standard, GitHub PR, Bitbucket
@@ -657,7 +657,7 @@ func mergedBranchName(c *object.Commit) string {
 	if m := mergeBranchRe.FindStringSubmatch(c.Message); m != nil {
 		return m[1]
 	}
-	if m := mergePRRe.FindStringSubmatch(c.Message); m != nil {
+	if m := mergeGitHubPRRe.FindStringSubmatch(c.Message); m != nil {
 		// Drop the leading "<owner>/" from the head ref.
 		if _, branch, ok := strings.Cut(m[1], "/"); ok {
 			return branch
@@ -665,7 +665,7 @@ func mergedBranchName(c *object.Commit) string {
 	}
 	// Bitbucket Server's "Merge in <project>/<repo> from <source> to <target>"
 	// body carries the source branch verbatim (no owner/remote prefix to strip).
-	if m := mergeBitbucketServerRe.FindStringSubmatch(c.Message); m != nil {
+	if m := mergeBitbucketServerPRRe.FindStringSubmatch(c.Message); m != nil {
 		return m[1]
 	}
 	return ""

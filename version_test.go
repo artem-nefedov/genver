@@ -755,6 +755,37 @@ func TestMasterBranch(t *testing.T) {
 		h.merge("feature/cool")
 		h.want("2.2.0")
 	})
+
+	// Regression: a short-lived branch that forks directly FROM a
+	// direct-feature-merge commit on the permanent branch (a no-develop
+	// "mainline" flow). The merge commit's release core is already established
+	// (0.2.0 here), so the branch must build straight on it — a non-feature
+	// branch adds a patch, giving 0.2.1. Previously genver re-scanned the
+	// section below the fork point, which still contained the feature merge, and
+	// re-applied its minor bump on top of 0.2.0, wrongly yielding 0.3.0. Checked
+	// for both permanent-branch names ("master" and "main").
+	for _, tc := range []struct{ name, mainName string }{
+		{"BranchForksFromDirectFeatureMergeMaster", "master"},
+		{"BranchForksFromDirectFeatureMergeMain", "main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarnessNamed(t, tc.mainName)
+			h.commit("root") // root treated as 0.1.0
+
+			// A direct feature merge bumps minor once: 0.1.0 -> 0.2.0.
+			h.newBranch("feature/cool")
+			h.commit("f1")
+			h.checkout(tc.mainName)
+			h.merge("feature/cool")
+			h.want("0.2.0")
+
+			// Fork a non-feature branch from that merge commit and add a commit.
+			h.newBranch("misc/ABC-1")
+			h.commit("m1")
+			h.want("0.2.1-ABC-1.1") // builds on 0.2.0 + one patch, NOT 0.3.0
+		})
+	}
 }
 
 // TestBothMainAndMasterMergedIntoDevelop covers the unusual repository where

@@ -28,6 +28,7 @@ More technical details on how it works.
 - The ceiling a "+semver:" merge imposes applies to every commit it introduced (those reachable from its second parent but not its first) at min(directive, any outer ceiling). Ceilings compose through nested capping merges (the lowest wins along a path), but a commit also reachable by an independent, un-capped path keeps its full weight. The commit COUNT is never affected — every commit in range is still counted once.
 - If first section of develop was not yet incremented compared to release, on new branch we should immediately see the increment
 - On feature/ (or feat/) branches we should see minor increment, which takes precedence over patch increment
+- On any other short-lived branch (bugfix/hotfix/etc.) we should immediately see a patch increment, even before its first commit; this floor never double-bumps — it only applies when the core was not already advanced past the last release (by accumulated integration-section work or the branch's own commits)
 - Version on develop shows what the future release version will be, but if we have no new commits it should not change
 
 ## Resolving reference branches (local vs remote)

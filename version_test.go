@@ -279,12 +279,13 @@ func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	h.want("2.1.0") // sanity: main reads the tag
 
 	// Bugfix branch off main. With no develop branch, it is versioned relative
-	// to main. No commits yet -> builds on the 2.1.0 release, counter 0.
+	// to main. A bugfix branch asserts a patch increment immediately, even with
+	// no commits of its own -> builds on 2.1.1 with counter 0.
 	const bug = "bugfix/ABC-123-foo_bar"
 	h.newBranch(bug)
-	h.want("2.1.0-ABC-123-foo-bar.0")
+	h.want("2.1.1-ABC-123-foo-bar.0")
 
-	// One direct commit -> patch increment, counter 1.
+	// One direct commit only advances the branch counter; the patch stays.
 	h.commit("b1")
 	h.want("2.1.1-ABC-123-foo-bar.1")
 
@@ -742,9 +743,10 @@ func TestMasterBranch(t *testing.T) {
 		h.tag("2.1.0", root)
 		h.want("2.1.0")
 
-		// Bugfix branch off master, versioned relative to master.
+		// Bugfix branch off master, versioned relative to master. A bugfix
+		// branch asserts a patch increment immediately, even with no commits.
 		h.newBranch("bugfix/ABC-9")
-		h.want("2.1.0-ABC-9.0")
+		h.want("2.1.1-ABC-9.0")
 		h.commit("b1")
 		h.want("2.1.1-ABC-9.1")
 
@@ -3503,6 +3505,178 @@ func TestMultipleMergesBumpOnce(t *testing.T) {
 		// Each bugfix contributes 2 commits: 3 bugfixes = 6.
 		h.want("0.1.1-alpha.6")
 	})
+
+	// A non-feature branch cut off a develop that is still sitting exactly at
+	// the last release (its section not yet advanced) asserts a patch increment
+	// immediately, even before its first commit: develop is at 2.1.0, so the
+	// bugfix branch reads 2.1.1 with counter 0. Its first commit then only
+	// advances the counter (the patch is already in scope), NOT the core. This
+	// is the develop-flow counterpart to the direct-off-main patch floor.
+	t.Run("BugfixOffReleaseCoreBumpsPatch", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // 0.1.0 boundary
+		h.tag("2.1.0", mustHead(t, h))
+		h.newBranch("develop")
+		h.want("2.1.0-alpha.0") // develop sits exactly at the release
+
+		// Bugfix branch off a develop still at the release core. The patch floor
+		// applies immediately: core 2.1.1, counter 0, before any commit.
+		h.newBranch("bugfix/urgent")
+		h.want("2.1.1-urgent.0")
+
+		// First commit only advances the counter; the core stays 2.1.1.
+		h.commit("fix")
+		h.want("2.1.1-urgent.1")
+	})
+
+	// A non-feature branch that follows an already-merged non-feature branch,
+	// with NO release in between, must not double-bump the core: the first
+	// bugfix merge already advanced develop's patch, so the second bugfix branch
+	// builds on that same patch level both before and after its first commit
+	// (only the trailing counter advances). This guards the immediate-patch
+	// floor on non-feature branches against re-bumping an already-bumped core.
+	t.Run("SecondBugfixNoDoublePatch", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root") // 0.1.0 boundary
+		h.tag("2.1.0", mustHead(t, h))
+		h.newBranch("develop")
+		h.want("2.1.0-alpha.0") // develop at the release, no new commits
+
+		// First bugfix branch: one commit, merged back into develop. This bumps
+		// develop's patch exactly once -> 2.1.1 (1 commit + 1 merge = 2).
+		h.newBranch("bugfix/first")
+		h.commit("fix1")
+		h.checkout("develop")
+		h.merge("bugfix/first")
+		h.want("2.1.1-alpha.2")
+
+		// Second bugfix branch created off the already-patch-bumped develop,
+		// WITHOUT any release. Before its first commit the core must stay 2.1.1
+		// (NOT 2.1.2): the patch floor sees the core was already advanced past
+		// the last release and does not bump again. Counter is 0.
+		h.newBranch("bugfix/second")
+		h.want("2.1.1-second.0")
+
+		// After its first commit only the counter advances; the core still must
+		// not climb to 2.1.2.
+		h.commit("fix2")
+		h.want("2.1.1-second.1")
+	})
+}
+
+// TestEmptyBranchMerge covers merging a short-lived branch that has NO commits
+// of its own (created and merged straight back). A merge's nature is derived
+// solely from the merge commit's MESSAGE, never from what the branch contributed
+// — and the harness always builds a real two-parent (--no-ff) merge commit — so
+// an empty branch's merge still advances the version exactly once, by the amount
+// its type implies (feature -> minor, anything else -> patch). The merge commit
+// itself is a real commit, so on develop it also advances the alpha counter. A
+// "+semver:" directive on the merge commit is exact even for an empty branch,
+// overriding the type-implied bump both up and down.
+func TestEmptyBranchMerge(t *testing.T) {
+	t.Parallel()
+
+	// Develop flow: an empty branch merged into develop bumps by its type and
+	// advances the counter by the single merge commit it introduces.
+	t.Run("IntoDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.tag("2.1.0", mustHead(t, h))
+		h.newBranch("develop")
+		h.want("2.1.0-alpha.0") // develop sits exactly at the release
+
+		// Empty feature branch (no commits) merged into develop. The feature
+		// merge is worth a minor even though the branch added nothing; the merge
+		// commit is the only new commit, so the counter is 1.
+		h.newBranch("feature/x")
+		h.checkout("develop")
+		h.merge("feature/x")
+		h.want("2.2.0-alpha.1")
+
+		// Empty bugfix branch merged into develop. A bugfix merge is only a
+		// patch, which does not exceed the minor already in scope, so the core
+		// stays 2.2.0; only the counter advances to 2.
+		h.newBranch("bugfix/y")
+		h.checkout("develop")
+		h.merge("bugfix/y")
+		h.want("2.2.0-alpha.2")
+	})
+
+	// Direct-to-main flow: an empty branch merged directly into main advances
+	// the release core once, by its type. Main versions carry no counter.
+	t.Run("IntoMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.tag("2.1.0", mustHead(t, h))
+		h.want("2.1.0")
+
+		// Empty feature branch merged directly into main -> minor. 2.1.0 -> 2.2.0.
+		h.newBranch("feature/x")
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("2.2.0")
+
+		// Empty bugfix branch merged directly into main -> patch. 2.2.0 -> 2.2.1.
+		h.newBranch("bugfix/y")
+		h.checkout("main")
+		h.merge("bugfix/y")
+		h.want("2.2.1")
+	})
+
+	// A "+semver:" directive on the merge commit is EXACT regardless of the
+	// branch's type or that it is empty: it both caps and floors the merge to
+	// that level, overriding the automatic feature-minor / patch. On develop the
+	// merge commit still advances the alpha counter.
+	t.Run("WithSemverDirectiveIntoDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.tag("2.1.0", mustHead(t, h))
+		h.newBranch("develop")
+		h.want("2.1.0-alpha.0")
+
+		// Empty feature branch merged with "+semver: patch": the directive caps
+		// the feature-minor DOWN to a patch. 2.1.0 -> 2.1.1, counter 1.
+		h.newBranch("feature/x")
+		h.checkout("develop")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("2.1.1-alpha.1")
+
+		// Empty bugfix branch merged with "+semver: major": the directive raises
+		// the merge ABOVE its patch floor to a major. 2.1.1 -> 3.0.0, counter 2.
+		h.newBranch("bugfix/y")
+		h.checkout("develop")
+		h.mergeMsg("bugfix/y", "Merge branch 'bugfix/y'\n\n+semver: major")
+		h.want("3.0.0-alpha.2")
+	})
+
+	// The same exact-directive behavior for empty-branch merges made directly
+	// into main.
+	t.Run("WithSemverDirectiveIntoMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("root")
+		h.tag("2.1.0", mustHead(t, h))
+		h.want("2.1.0")
+
+		// Empty feature branch + "+semver: patch": directive caps to patch.
+		// 2.1.0 -> 2.1.1.
+		h.newBranch("feature/x")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("2.1.1")
+
+		// Empty bugfix branch + "+semver: major": directive raises to major.
+		// 2.1.1 -> 3.0.0.
+		h.newBranch("bugfix/y")
+		h.checkout("main")
+		h.mergeMsg("bugfix/y", "Merge branch 'bugfix/y'\n\n+semver: major")
+		h.want("3.0.0")
+	})
 }
 
 // TestMultipleUntaggedMergesIntoMain covers the main-based flow (NO develop
@@ -3994,6 +4168,58 @@ func TestOctopusMerge(t *testing.T) {
 		h.checkout("main")
 		h.octopusMerge("Merge branches 'hotfix/x' and 'hotfix/y' +semver: minor", "hotfix/x", "hotfix/y")
 		h.want("1.1.0")
+	})
+
+	// An octopus merge landing on main whose parents are develop AND another
+	// branch. A merge's nature is derived solely from its MESSAGE, and the main
+	// path reads only Parent(1); the extra octopus parents are not consulted. So
+	// the same topology resolves differently depending on the message form.
+	t.Run("DevelopPlusOtherIntoMain", func(t *testing.T) {
+		t.Parallel()
+
+		// buildRepo returns a repo where develop has accrued a patch (two commits)
+		// since the 0.1.0 root, and a feature/x branch off main carries one commit.
+		// The caller performs the octopus merge onto main and asserts.
+		buildRepo := func() *harness {
+			h := newHarness(t)
+			h.commit("root") // main root, 0.1.0
+			h.newBranch("develop")
+			h.commit("d1")
+			h.commit("d2") // develop -> 0.1.1-alpha.2
+			h.checkout("main")
+			h.newBranch("feature/x")
+			h.commit("fx1")
+			h.checkout("main")
+			return h
+		}
+
+		// Message names "develop": classified as a develop RELEASE merge, so the
+		// release publishes develop's accumulated core (patch: 0.1.1). Parent(1)
+		// is develop; the feature/x parent is not consulted on the main path.
+		t.Run("MessageNamesDevelop", func(t *testing.T) {
+			t.Parallel()
+			h := buildRepo()
+			h.octopusMerge("Merge branch 'develop'", "develop", "feature/x")
+			h.want("0.1.1")
+		})
+
+		// Message names the feature branch: classified as a direct FEATURE merge
+		// (minor: 0.2.0), independent of develop being an octopus parent.
+		t.Run("MessageNamesFeature", func(t *testing.T) {
+			t.Parallel()
+			h := buildRepo()
+			h.octopusMerge("Merge branch 'feature/x'", "feature/x", "develop")
+			h.want("0.2.0")
+		})
+
+		// Unrecognized message: defaults to a develop release merge (Parent(1) is
+		// develop), publishing develop's accumulated patch core (0.1.1).
+		t.Run("MessageUnrecognized", func(t *testing.T) {
+			t.Parallel()
+			h := buildRepo()
+			h.octopusMerge("Merge assorted branches", "develop", "feature/x")
+			h.want("0.1.1")
+		})
 	})
 }
 

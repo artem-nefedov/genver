@@ -1136,6 +1136,12 @@ func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Comm
 // fork point on main is a boundary and the "section" below the branch carries
 // no accumulated bump — the branch builds straight on main's release core.
 //
+// A feature branch asserts at least a minor bump and any other short-lived
+// branch at least a patch bump the moment it exists, even before its first
+// commit. These minimums only take effect when the core has not already been
+// advanced past the last release (by accumulated integration-section work or
+// the branch's own commits); a stronger existing bump is kept as-is.
+//
 // A prerelease reference tag on one of the branch's own commits (e.g.
 // "4.5.6-foobar-x.3") can override all of this: it ANCHORS the version to the
 // tag's core (raised by any explicit "+semver:"/feature bump on commits after
@@ -1212,6 +1218,9 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	if isFeatureBranch(branch) {
 		eff = max(eff, bumpMinor) // feature increment takes precedence
 		c.logf("other: feature branch -> effective bump forced to at least minor")
+	} else {
+		eff = max(eff, bumpPatch)
+		c.logf("other: non-feature branch -> effective bump forced to at least patch")
 	}
 
 	out := belowCore.bump(eff)

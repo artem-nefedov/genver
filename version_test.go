@@ -312,6 +312,64 @@ func TestScenarioNoDevelopBranchesOffMain(t *testing.T) {
 	h.want("2.2.0")
 }
 
+// TestScenarioNoDevelopMainMergedIntoFeatureCounterIsMonotonic guards the
+// counter fix in the no-develop flow, where short-lived branches fork off main
+// and main itself is the integration branch. main's mainline is walled off the
+// counter (via permanentMainlineWalls with develop absent) just like develop is
+// in the develop-based flow, so merging an advanced main INTO the branch — even
+// indirectly through a sibling that carried main — advances the counter only by
+// the branch's own work, never by main's churn.
+//
+// Note: unlike the develop-based monotonic tests, this flow already computed the
+// right counter before the fix, because every main commit above the release tag
+// is itself a boundary that the section logic stops at. The test locks in that
+// the permanent-mainline wall does not regress the no-develop flow.
+func TestScenarioNoDevelopMainMergedIntoFeatureCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0") // main root
+	h.tag("2.1.0", mustHead(t, h))
+
+	// Feature branch off main with two own commits (minor floor -> 2.2.0).
+	const feat = "feature/cool-abc"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.commit("f2")
+	h.want("2.2.0-cool-abc.2")
+
+	// main advances substantially via unrelated PR merges (mainline churn).
+	h.checkout("main")
+	for i := range 5 {
+		o := fmt.Sprintf("bugfix/other-%d", i)
+		h.newBranch(o)
+		h.commits(3)
+		h.checkout("main")
+		h.mergePR(o, 300+i, "acme-org")
+	}
+
+	// A sibling off main, one own commit, then merges the advanced main into
+	// itself (so it carries main's churn on its second-parent side).
+	h.checkout("main")
+	h.newBranch("bugfix/carries-main")
+	h.commit("s1")
+	h.merge("main")
+
+	// Merge the sibling into the feature branch. Own work added: s1 + the
+	// sibling's main-merge commit (2) + our merge commit (1) = +3. main's churn
+	// the sibling carried is walled off.
+	h.checkout(feat)
+	h.merge("bugfix/carries-main")
+	h.want("2.2.0-cool-abc.5")
+
+	// Merge the advanced main directly in too: just the merge commit counts (+1).
+	h.merge("main")
+	h.want("2.2.0-cool-abc.6")
+
+	// A further own commit advances the counter by exactly one more.
+	h.commit("f3")
+	h.want("2.2.0-cool-abc.7")
+}
+
 // TestScenarioBugfixMergedThenCheckedOutAgain covers checking out a short-lived
 // branch again AFTER it has been merged into develop but before it is deleted.
 // Once merged, the branch tip is an ancestor of develop, so a plain merge-base
@@ -502,6 +560,429 @@ func TestScenarioDevelopMergedIntoFeatureKeepsMinor(t *testing.T) {
 	h.checkout(feat)
 	h.merge("develop")
 	h.want("0.40.0-cool-abc.2")
+}
+
+// TestScenarioDevelopMergedIntoFeatureCounterIsMonotonic is a regression test
+// for a bug where two different commits on a feature branch produced the SAME
+// version. The branch merged develop back into itself after develop had advanced
+// with many commits. The counter used to fold that merged-in develop history
+// into its count, which both inflated the counter and made it non-monotonic:
+// picking up develop's churn could offset the branch's own advance so that a
+// later commit reused an earlier commit's counter.
+//
+// The counter must count only the branch's OWN commits (its first-parent line
+// plus genuine side branches merged in), never the integration branch's history
+// merged in via "git merge develop". So each successive commit — including the
+// develop-merge commit itself — must advance the counter by exactly one, no
+// matter how much develop churn the merge dragged in.
+func TestScenarioDevelopMergedIntoFeatureCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0") // boundary core = 0.13.0
+
+	// Feature branch off the boundary with three own commits.
+	const feat = "feature/cool-abc"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.want("0.14.0-cool-abc.1")
+	h.commit("f2")
+	h.want("0.14.0-cool-abc.2")
+	commitB := h.commit("f3")
+	h.want("0.14.0-cool-abc.3") // this is commit "B"
+
+	// Meanwhile develop advances substantially: several unrelated short-lived
+	// branches land via PR merges, adding a lot of history to develop's mainline.
+	h.checkout("develop")
+	for i := range 5 {
+		other := fmt.Sprintf("bugfix/other-%d", i)
+		h.newBranch(other)
+		h.commits(3)
+		h.checkout("develop")
+		h.mergePR(other, 300+i, "acme-org")
+	}
+
+	// Merge develop back INTO the feature branch. Despite dragging in all of
+	// develop's churn, this is a single commit on the branch's own line: the
+	// counter advances by exactly one (from 3 to 4), NOT by the merged-in count.
+	h.checkout(feat)
+	h.merge("develop")
+	h.want("0.14.0-cool-abc.4")
+
+	// One more own commit ("A") advances the counter again. Crucially, its
+	// version must DIFFER from commit B's version — the original bug produced the
+	// same string for both.
+	commitA := h.commit("f4")
+	h.want("0.14.0-cool-abc.5")
+
+	if commitA == commitB {
+		t.Fatal("test setup error: commits A and B must be distinct")
+	}
+}
+
+// TestScenarioDevelopMergedIntoFeatureRepeatedlyCounterIsMonotonic covers
+// develop merged INTO the feature branch MORE THAN ONCE, with develop advancing
+// between each merge-in. Each merge-develop commit counts as exactly one unit of
+// the branch's own work; none of develop's churn counts, whether it arrived via
+// the first or a later merge-in. This works because develop's first-parent chain
+// from its current tip is a superset of any earlier tip's chain (develop only
+// advances by direct commits, which stay on the chain, or by merges, whose new
+// commit becomes the tip with the old tip as its first parent), so the wall
+// covers churn from every merge-in.
+func TestScenarioDevelopMergedIntoFeatureRepeatedlyCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0")
+
+	const feat = "feature/cool-abc"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.want("0.14.0-cool-abc.1")
+
+	// develop advances via PR merges, then merge #1 into the feature branch.
+	h.checkout("develop")
+	for i := range 3 {
+		o := fmt.Sprintf("bugfix/r1-%d", i)
+		h.newBranch(o)
+		h.commits(2)
+		h.checkout("develop")
+		h.mergePR(o, 100+i, "acme-org")
+	}
+	h.checkout(feat)
+	h.merge("develop")
+	h.want("0.14.0-cool-abc.2") // +1 merge commit; round-1 churn walled off
+	h.commit("f2")
+	h.want("0.14.0-cool-abc.3")
+
+	// develop advances again, then merge #2 into the feature branch.
+	h.checkout("develop")
+	for i := range 3 {
+		o := fmt.Sprintf("bugfix/r2-%d", i)
+		h.newBranch(o)
+		h.commits(2)
+		h.checkout("develop")
+		h.mergePR(o, 200+i, "acme-org")
+	}
+	h.checkout(feat)
+	h.merge("develop")
+	h.want("0.14.0-cool-abc.4") // +1 merge commit; round-2 churn walled off too
+	h.commit("f3")
+	h.want("0.14.0-cool-abc.5")
+}
+
+// TestScenarioFeatureMergedBackBetweenDevelopMergesCounterIsMonotonic is the
+// nastiest multi-merge case: the feature branch merges develop in, is then
+// merged BACK into develop (its own work now lands on develop's mainline via a
+// PR merge's second parent), then merges the now-advanced develop in AGAIN.
+// develop's first-parent chain now contains that PR-merge commit — but the
+// feature's own commits sit on its SECOND parent, off the chain, so the wall
+// does not exclude them. Pre-fix this collapsed the counter (it even ran
+// BACKWARDS and produced duplicate versions); the counter must stay monotonic.
+func TestScenarioFeatureMergedBackBetweenDevelopMergesCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0")
+
+	const feat = "feature/cool-abc"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.commit("f2")
+	h.want("0.14.0-cool-abc.2")
+
+	// develop advances; feature merges develop in (#1); one more own commit.
+	h.checkout("develop")
+	h.commits(2)
+	h.checkout(feat)
+	h.merge("develop")
+	h.want("0.14.0-cool-abc.3") // +1 merge commit
+	h.commit("f3")
+	h.want("0.14.0-cool-abc.4")
+
+	// The feature is merged INTO develop via a PR (f1..f3 now on develop's
+	// mainline through the PR-merge's second parent). develop then advances more.
+	h.checkout("develop")
+	h.mergePR(feat, 500, "acme-org")
+	h.commits(2)
+
+	// Back on the feature branch: one more own commit, then merge the advanced
+	// develop in AGAIN (#2). The feature's own earlier commits must still count
+	// (they are off develop's first-parent chain), so the counter keeps climbing.
+	h.checkout(feat)
+	h.commit("f4")
+	h.want("0.14.0-cool-abc.5")
+	h.merge("develop")
+	h.want("0.14.0-cool-abc.6") // +1 merge commit; no collapse, no churn
+	h.commit("f5")
+	h.want("0.14.0-cool-abc.7")
+}
+
+// TestScenarioMainMergedIntoFeatureCounterIsMonotonic is the sibling of
+// TestScenarioDevelopMergedIntoFeatureCounterIsMonotonic for the OTHER permanent
+// branch: merging main (a hotfix/back-merge) into a feature branch must not fold
+// main's own history into the branch's counter. When develop exists, main is not
+// the integration branch, so its mainline must be walled off too — otherwise the
+// same "counter inflated by merged-in permanent history" bug recurs with main.
+// Each own commit and the main-merge commit advance the counter by exactly one,
+// no matter how far main has advanced.
+func TestScenarioMainMergedIntoFeatureCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0") // boundary core = 0.13.0 on main
+
+	// main advances substantially with hotfix commits after the release.
+	h.checkout("main")
+	h.commits(10)
+
+	// Feature branch off develop with one own commit.
+	const feat = "feature/cool-abc"
+	h.checkout("develop")
+	h.newBranch(feat)
+	h.commit("f1")
+	h.want("0.14.0-cool-abc.1")
+
+	// Merge main INTO the feature branch. Despite main's 10-commit churn, this is
+	// a single commit on the branch's own line: counter goes 1 -> 2, not 1 -> 12.
+	h.merge("main")
+	h.want("0.14.0-cool-abc.2")
+
+	// A further own commit advances the counter by exactly one more.
+	h.commit("f2")
+	h.want("0.14.0-cool-abc.3")
+}
+
+// TestScenarioComplexPermanentBranchesViaSiblingsCounterIsMonotonic is a
+// harder regression for the "counter inflated by merged-in permanent history"
+// bug. Instead of merging develop/main straight into the branch, the permanent
+// mainlines arrive INDIRECTLY: two sibling short-lived branches each merge a
+// permanent branch into themselves (one carries develop, one carries main), AND
+// each sibling also has ANOTHER short-lived branch merged into IT, and only then
+// are those siblings merged into the branch we compute for — with direct commits
+// interleaved. The wall must exclude the permanent history no matter how it
+// reached the branch, while still counting every sibling's own work, the nested
+// short-lived branches merged into the siblings, and the branch's own commits.
+// So the counter advances by exactly one per own commit, and per merge by "all
+// the merged sibling's OWN work (its commits + nested short-lived merges) + 1
+// merge commit" — never by the develop/main churn the siblings dragged along.
+func TestScenarioComplexPermanentBranchesViaSiblingsCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0") // boundary core = 0.13.0
+
+	// develop advances substantially via unrelated PR merges (mainline churn).
+	h.checkout("develop")
+	for i := range 6 {
+		o := fmt.Sprintf("bugfix/dchurn-%d", i)
+		h.newBranch(o)
+		h.commits(3)
+		h.checkout("develop")
+		h.mergePR(o, 200+i, "acme-org")
+	}
+
+	// main advances substantially with hotfix commits (its own mainline churn).
+	h.checkout("main")
+	h.commits(8)
+
+	// Feature branch off develop with two own commits.
+	const feat = "feature/cool-abc"
+	h.checkout("develop")
+	h.newBranch(feat)
+	h.commit("f1")
+	h.commit("f2")
+	h.want("0.14.0-cool-abc.2")
+
+	// Sibling #1: off develop, one own commit (s1); a nested short-lived branch
+	// (n1a, n1b) is merged INTO it; then it merges the advanced develop INTO
+	// itself (carrying develop's mainline churn on its second-parent side).
+	// The sibling's OWN work is: s1 + nested (n1a + n1b + nested-merge) +
+	// develop-merge commit = 1 + 3 + 1 = 5.
+	h.checkout("develop")
+	h.newBranch("bugfix/carries-develop")
+	h.commit("s1")
+	h.newBranch("feature/nested-1")
+	h.commit("n1a")
+	h.commit("n1b")
+	h.checkout("bugfix/carries-develop")
+	h.merge("feature/nested-1")
+	h.merge("develop")
+
+	// Sibling #2: off develop, one own commit (m1); a nested short-lived branch
+	// (n2a) is merged INTO it; then it merges the advanced main INTO itself
+	// (carrying main's churn). The sibling's OWN work is: m1 + nested (n2a +
+	// nested-merge) + main-merge commit = 1 + 2 + 1 = 4.
+	h.checkout("develop")
+	h.newBranch("bugfix/carries-main")
+	h.commit("m1")
+	h.newBranch("bugfix/nested-2")
+	h.commit("n2a")
+	h.checkout("bugfix/carries-main")
+	h.merge("bugfix/nested-2")
+	h.merge("main")
+
+	// Back on the feature branch, interleave sibling merges with direct commits.
+	h.checkout(feat)
+
+	// Merge sibling #1. Adds the sibling's own work (5) plus our merge commit (1)
+	// = +6. develop's churn it carried is walled off.
+	h.merge("bugfix/carries-develop")
+	h.want("0.14.0-cool-abc.8")
+
+	// A direct commit in between: +1.
+	h.commit("f3")
+	h.want("0.14.0-cool-abc.9")
+
+	// Merge sibling #2. Adds the sibling's own work (4) plus our merge commit (1)
+	// = +5. main's churn it carried is walled off — the pre-fix bug counted those
+	// 8 hotfix commits here, jumping to .23 instead of .14.
+	h.merge("bugfix/carries-main")
+	h.want("0.14.0-cool-abc.14")
+
+	// Another direct commit: +1.
+	h.commit("f4")
+	h.want("0.14.0-cool-abc.15")
+
+	// Finally merge develop straight in too: just the merge commit counts (+1),
+	// develop's churn walled off.
+	h.merge("develop")
+	h.want("0.14.0-cool-abc.16")
+
+	// One last own commit: +1, and it must be distinct from every earlier state.
+	h.commit("f5")
+	h.want("0.14.0-cool-abc.17")
+}
+
+// TestScenarioDeepNestedChainCarriesPermanentCounterIsMonotonic drives the
+// permanent-branch churn through a DEEP chain of short-lived branches before it
+// reaches the branch under calculation: develop is merged into a, a is merged
+// into b, b is merged into c, and we compute for c (b also carries main). The
+// wall must exclude develop's and main's history no matter how many short-lived
+// hops it travels through, while counting every intermediate branch's own
+// commits and merge commits along the chain. So merging b into c adds only c's
+// own merge commit plus the genuine own work of b and (transitively) a — never
+// the develop/main churn that rode along the chain.
+func TestScenarioDeepNestedChainCarriesPermanentCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0") // boundary core = 0.13.0
+
+	// develop advances substantially via unrelated PR merges (mainline churn).
+	h.checkout("develop")
+	for i := range 5 {
+		o := fmt.Sprintf("bugfix/dchurn-%d", i)
+		h.newBranch(o)
+		h.commits(3)
+		h.checkout("develop")
+		h.mergePR(o, 200+i, "acme-org")
+	}
+
+	// main advances with hotfix commits (its own mainline churn).
+	h.checkout("main")
+	h.commits(7)
+
+	// c: the branch we compute for, off develop with one own commit.
+	const c = "feature/cool-abc"
+	h.checkout("develop")
+	h.newBranch(c)
+	h.commit("c1")
+	h.want("0.14.0-cool-abc.1")
+
+	// a: off develop, own commit a1, then merges the advanced develop INTO itself
+	// (a now carries develop's mainline churn). a's OWN work: a1 + develop-merge
+	// commit = 2.
+	h.checkout("develop")
+	h.newBranch("feature/a")
+	h.commit("a1")
+	h.merge("develop")
+
+	// b: off develop, own commit b1, then merges a INTO itself (so b transitively
+	// carries develop's churn through a), and also merges main INTO itself. b's
+	// OWN work: b1 + merge-a commit + merge-main commit = 3, PLUS a's own work (2)
+	// rides in through the a-merge.
+	h.checkout("develop")
+	h.newBranch("feature/b")
+	h.commit("b1")
+	h.merge("feature/a")
+	h.merge("main")
+
+	// c merges b in. Adds c's merge commit (1) + b's own work (3) + a's own work
+	// (2) = +6. develop's and main's churn, however deep in the chain, is walled
+	// off — the pre-fix bug counted it and jumped to .15 instead of .7.
+	h.checkout(c)
+	h.merge("feature/b")
+	h.want("0.14.0-cool-abc.7")
+
+	// A further own commit advances the counter by exactly one more.
+	h.commit("c2")
+	h.want("0.14.0-cool-abc.8")
+}
+
+// TestScenarioReferenceTagThenDevelopMergedInCounterIsMonotonic combines the
+// counter fix with the prerelease-reference-tag anchor logic — two features that
+// interact through the reference tag's "commits after the tag" counter. A branch
+// carries a reference tag (which anchors its core and label and continues its
+// counter), then merges an advanced develop INTO itself. The tag's continued
+// counter must count only the branch's OWN commits after the tag, not develop's
+// churn merged in afterward: the reference path's after-count must honor the
+// same permanent-mainline wall as the plain counter. Otherwise merging develop
+// inflates the anchored counter (the pre-fix bug jumped it to .23 here).
+func TestScenarioReferenceTagThenDevelopMergedInCounterIsMonotonic(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.13.0")
+
+	// Feature branch with one own commit, tagged with a prerelease reference tag
+	// that anchors the core to 0.20.0, the label to "cool-abc", and the counter
+	// to 5. On the tagged commit the version is the tag verbatim.
+	const feat = "feature/cool-abc"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.tag("0.20.0-cool-abc.5", mustHead(t, h))
+	h.want("0.20.0-cool-abc.5")
+
+	// A plain commit after the tag continues the anchored counter: 5 -> 6.
+	h.commit("f2")
+	h.want("0.20.0-cool-abc.6")
+
+	// develop advances substantially via unrelated PR merges (mainline churn).
+	h.checkout("develop")
+	for i := range 4 {
+		o := fmt.Sprintf("bugfix/dchurn-%d", i)
+		h.newBranch(o)
+		h.commits(3)
+		h.checkout("develop")
+		h.mergePR(o, 200+i, "acme-org")
+	}
+
+	// Merge the advanced develop INTO the anchored feature branch. The anchor
+	// holds (core 0.20.0, label cool-abc); the merge commit is one unit of the
+	// branch's own work after the tag, so the counter advances 6 -> 7. develop's
+	// churn must NOT count against the anchored counter.
+	h.checkout(feat)
+	h.merge("develop")
+	h.want("0.20.0-cool-abc.7")
+
+	// A further own commit advances the anchored counter by exactly one more.
+	h.commit("f3")
+	h.want("0.20.0-cool-abc.8")
 }
 
 // TestScenarioLargeSectionWithFeatureAndBugfix covers a large develop section

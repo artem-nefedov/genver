@@ -59,6 +59,12 @@ type repo struct {
 	// reference branches are resolved (local vs remote-tracking ref, and why).
 	// It shares the calculator's --debug sink so all trace output is unified.
 	trace io.Writer
+
+	// fpChainCache memoizes firstParentChain results by tip hash within a single
+	// invocation. The permanent branch tips (develop, main/master) are walked by
+	// both forkBase and permanentMainlineWalls, and decoding a long mainline is
+	// not free, so caching avoids re-walking the same chain twice.
+	fpChainCache map[plumbing.Hash][]*object.Commit
 }
 
 // logf writes a timestamped trace line when tracing is enabled (a no-op
@@ -517,6 +523,9 @@ func less(a, b core) bool {
 // firstParentChain returns the first-parent history from a commit down to the
 // root, newest first.
 func (g *repo) firstParentChain(from *object.Commit) ([]*object.Commit, error) {
+	if cached, ok := g.fpChainCache[from.Hash]; ok {
+		return cached, nil
+	}
 	var chain []*object.Commit
 	c := from
 	for c != nil {
@@ -530,6 +539,10 @@ func (g *repo) firstParentChain(from *object.Commit) ([]*object.Commit, error) {
 		}
 		c = p
 	}
+	if g.fpChainCache == nil {
+		g.fpChainCache = map[plumbing.Hash][]*object.Commit{}
+	}
+	g.fpChainCache[from.Hash] = chain
 	return chain, nil
 }
 

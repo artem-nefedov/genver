@@ -1093,19 +1093,57 @@ func (c *calculator) integrationBranch() (*object.Commit, string, error) {
 	return mainCommit, name, nil
 }
 
+// permanentMainlineWalls returns the set of commit hashes on the first-parent
+// chains of the permanent branches — "develop" (when it exists) and the main
+// branch ("main"/"master"). These are the repository's long-lived mainlines;
+// their history is never a short-lived branch's "own work". When one of them is
+// merged INTO a short-lived branch, treating its mainline commits as walls (see
+// otherVersion's counter) keeps that permanent history from inflating the
+// branch's counter, regardless of which permanent branch was merged in.
+func (c *calculator) permanentMainlineWalls() (map[plumbing.Hash]bool, error) {
+	walls := map[plumbing.Hash]bool{}
+	developTip, err := c.g.branchCommit("develop")
+	if err != nil {
+		return nil, err
+	}
+	tips := []*object.Commit{}
+	if developTip != nil {
+		tips = append(tips, developTip)
+	}
+	if mainCommit, _, err := c.g.mainBranch(); err == nil && mainCommit != nil {
+		tips = append(tips, mainCommit)
+	}
+	for _, tip := range tips {
+		chain, err := c.g.firstParentChain(tip)
+		if err != nil {
+			return nil, err
+		}
+		for _, cm := range chain {
+			walls[cm.Hash] = true
+		}
+	}
+	return walls, nil
+}
+
 // forkBase returns the commit on the integration branch's first-parent chain
 // (its permanent mainline) that the branch was cut from: the newest such commit
-// that is an ancestor of head.
+// that lies on HEAD's OWN first-parent line.
 //
 // This is the branch's fork point, and it is stable regardless of whether the
 // branch has since been merged back into the integration branch. A plain
 // merge-base collapses onto head once the branch is merged (its own commits then
 // belong to the integration branch), which would erase the branch's increment;
 // walking the integration mainline instead ignores the merge commit — head is
-// its second parent, not an ancestor of it — and finds the true fork point. When
-// the branch has advanced past that fork point (e.g. develop was later merged
-// back into it), the newest chain commit reachable from head is still the fork
-// point, so the branch's own commits above it are counted correctly.
+// its second parent, not an ancestor of it — and finds the true fork point.
+//
+// The fork point must sit on head's own first-parent line rather than merely be
+// an ancestor of head. When the integration branch is merged INTO the feature
+// branch ("git merge develop"), the integration mainline enters through the
+// merge's SECOND parent, so newer integration-mainline commits become ancestors
+// of head without being on the branch's line. Selecting the newest such ancestor
+// would skip past the branch's own earlier commits and miscount them; requiring
+// the fork point to be on head's first-parent line ignores those merged-in
+// commits and keeps the count monotonic as the branch advances.
 func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Commit, error) {
 	chain, err := c.g.firstParentChain(integrationTip) // newest first
 	if err != nil {
@@ -1115,13 +1153,31 @@ func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Comm
 	if err != nil {
 		return nil, err
 	}
+	// Walk head's own first-parent line and mark it. A commit reachable from head
+	// only through a merge's second parent (e.g. an integration branch merged into
+	// this one) is not on the line and cannot be the fork point.
+	ownLine := map[plumbing.Hash]bool{}
+	for h := head.Hash; ; {
+		ownLine[h] = true
+		parents, ok := pool[h]
+		if !ok || len(parents) == 0 {
+			break
+		}
+		h = parents[0]
+	}
+	for _, cm := range chain {
+		if ownLine[cm.Hash] {
+			return cm, nil
+		}
+	}
+	// No mainline commit is on head's first-parent line (unrelated histories, or a
+	// branch built entirely off-mainline): fall back to the newest mainline commit
+	// that is at least an ancestor of head, then to the plain merge-base.
 	for _, cm := range chain {
 		if _, reachable := pool[cm.Hash]; reachable {
 			return cm, nil
 		}
 	}
-	// No mainline commit is an ancestor of head (unrelated histories): fall back
-	// to the plain merge-base so the caller still has a base to build on.
 	return c.g.mergeBase(head, integrationTip)
 }
 
@@ -1205,14 +1261,48 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 
 	// The branch's own commits (reachable from head but not from the fork point)
 	// contribute at least a patch bump. Exclude everything reachable from the
-	// fork point so the count matches `git rev-list mb..head`. One walk yields
-	// the count, the bump, and any reference tag among the branch's commits.
+	// fork point so the scan matches `git rev-list mb..head`. One walk yields the
+	// bump and any reference tag among the branch's commits; the counter is scoped
+	// separately to the branch's own first-parent line (see below).
 	mbSet := ancestorHashesIn(mb.Hash, pool)
 	rs, err := c.scanRange(head.Hash, mbSet, pool)
 	if err != nil {
 		return core{}, "", 0, false, err
 	}
-	n := rs.count
+	// The counter is the number of the branch's OWN commits: the commits in
+	// mb..head, excluding the permanent mainlines' own history that was later
+	// merged back INTO this branch ("git merge develop", or "git merge main" for
+	// a hotfix/back-merge). Counting the full mb..head range would fold that
+	// permanent-branch churn into the counter, inflating it and making it
+	// non-monotonic across the branch's history (two different branch commits
+	// could then share a counter — the reported bug).
+	//
+	// A permanent mainline enters the branch through a merge whose SECOND parent
+	// sits on that mainline's own first-parent chain. Treating every commit on
+	// the permanent branches' first-parent chains (develop and main/master) as a
+	// wall — excluded and not traversed through — drops exactly the mainline
+	// commit merged in and all the mainline history reachable only beneath it,
+	// while still counting genuine side work merged in from other short-lived
+	// branches (e.g. a feature branch merged into a bugfix branch), which does not
+	// sit on those chains. The bump and any reference tag still come from the full
+	// range scanned above (a "+semver:" directive on a merged-in commit must still
+	// raise the core).
+	walls, err := c.permanentMainlineWalls()
+	if err != nil {
+		return core{}, "", 0, false, err
+	}
+	countExclude := map[plumbing.Hash]bool{}
+	for h := range mbSet {
+		countExclude[h] = true
+	}
+	for h := range walls {
+		countExclude[h] = true
+	}
+	cs, err := c.scanRange(head.Hash, countExclude, pool)
+	if err != nil {
+		return core{}, "", 0, false, err
+	}
+	n := cs.count
 	c.logf("other: branch's own commits bump = %s", rs.bump)
 	eff := max(sectionBump, rs.bump)
 	if isFeatureBranch(branch) {
@@ -1233,7 +1323,14 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	// the release boundary the branch builds on. When the tag's anchor is below
 	// that boundary, the tag is ignored and the normally-computed core stands.
 	if rs.hasRef {
-		after, aerr := c.scanRange(head.Hash, ancestorHashesIn(rs.nearestHash, pool), pool)
+		// Commits after the tag, excluding the integration branch's own history
+		// merged in afterward — mirrors the counter's scoping above so a "git
+		// merge develop" after the reference tag does not inflate its counter.
+		afterExclude := ancestorHashesIn(rs.nearestHash, pool)
+		for h := range countExclude {
+			afterExclude[h] = true
+		}
+		after, aerr := c.scanRange(head.Hash, afterExclude, pool)
 		if aerr != nil {
 			return core{}, "", 0, false, aerr
 		}

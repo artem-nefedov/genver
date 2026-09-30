@@ -2927,9 +2927,14 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
 		h.backMerge()
-		h.want("0.3.0-alpha.2")
+		// The feature merge that produced main's 0.2.0 is a published release
+		// point on main's own first-parent chain; its minor is already baked into
+		// 0.2.0. Back-merging main into develop therefore does NOT re-apply that
+		// minor (which would double-bump to 0.3.0). The back-merge commit itself
+		// is develop's only new work, contributing a plain patch floor: 0.2.1.
+		h.want("0.2.1-alpha.2")
 		h.commit("d1")
-		h.want("0.3.0-alpha.3")
+		h.want("0.2.1-alpha.3")
 	})
 
 	// The "feat/" shorthand is treated exactly like "feature/": the branch takes
@@ -2952,9 +2957,12 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
 		h.backMerge()
-		h.want("0.3.0-alpha.2")
+		// As with "feature/", the "feat/" merge on main is a spent release point:
+		// its minor is baked into 0.2.0 and is not re-applied on the back-merge.
+		// The back-merge commit contributes only a patch floor: 0.2.1.
+		h.want("0.2.1-alpha.2")
 		h.commit("d1")
-		h.want("0.3.0-alpha.3")
+		h.want("0.2.1-alpha.3")
 	})
 
 	t.Run("FeatureMinorOnceWithTag", func(t *testing.T) {
@@ -2977,9 +2985,12 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.checkout("develop")
 		h.want("0.1.0-alpha.0")
 		h.backMerge()
-		h.want("0.3.0-alpha.2")
+		// The tagged feature merge on main is a spent release point; its minor is
+		// baked into 0.2.0 and is not re-applied on the back-merge. Only the
+		// back-merge commit is new develop work, giving a patch floor: 0.2.1.
+		h.want("0.2.1-alpha.2")
 		h.commit("d1")
-		h.want("0.3.0-alpha.3")
+		h.want("0.2.1-alpha.3")
 	})
 
 	// A non-feature branch merged straight into main bumps patch, once.
@@ -3226,6 +3237,311 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.want("0.2.0-alpha.4")
 		h.commit("d1")
 		h.want("0.2.0-alpha.5")
+	})
+}
+
+// TestFeatureMergedIntoMainThenBackMerged is a regression test for the reported
+// bug where a feature branch merged DIRECTLY into main, then main merged back
+// into develop, double-applied the feature-minor.
+//
+// Setup (the exact reported scenario):
+//   - develop is released into main (0.2.0), develop reads 0.2.0-alpha.x
+//   - a feature/ branch is cut directly from main, committed, and merged back
+//     into main, which correctly reads 0.3.0
+//   - main is then merged back into develop
+//
+// develop must NOT read 0.4.0-alpha.x: the feature merge's minor is already
+// spent in main's 0.3.0 (it is a published release point on main's first-parent
+// chain), so re-entering it via the back-merge does not re-apply the minor. The
+// back-merge commit is develop's only new work, contributing a plain patch
+// floor, so develop reads 0.3.1-alpha.<count>.
+func TestFeatureMergedIntoMainThenBackMerged(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+
+	// Root on main (0.1.0), develop cut from it with a minor's worth of work.
+	h.commit("root")
+	h.newBranch("develop")
+	h.commit("develop work +semver: minor")
+	h.checkout("main")
+	mg := h.merge("develop")
+	h.tag("0.2.0", mg)
+	h.want("0.2.0")
+
+	h.checkout("develop")
+	h.want("0.2.0-alpha.1") // develop sits at the release
+
+	// Feature branch cut DIRECTLY from main, one commit, merged back into main.
+	h.checkout("main")
+	h.newBranch("feature/x")
+	h.commit("feature work")
+	h.checkout("main")
+	h.merge("feature/x")
+	h.want("0.3.0") // feature merge on main bumps minor once (correct)
+
+	// Merge main back into develop. The feature merge's minor is already spent in
+	// 0.3.0, so develop must not double-bump to 0.4.0. The back-merge commit is
+	// develop's only new work: a patch floor over 0.3.0 -> 0.3.1. The section
+	// contains the feature merge and the back-merge = 2 commits.
+	h.checkout("develop")
+	h.backMerge()
+	h.want("0.3.1-alpha.2")
+
+	// A further direct develop commit only advances the counter.
+	h.commit("d1")
+	h.want("0.3.1-alpha.3")
+
+	h.checkout("main")
+	h.merge("develop")
+	h.want("0.3.1")
+}
+
+// TestMajorMergedIntoMainThenBackMerged extends TestFeatureMergedIntoMainThenBackMerged
+// across every "+semver:" directive level and placement: a branch is merged
+// DIRECTLY into main (with a directive on an inner commit or on the merge commit
+// itself), main advances its release core, and main is then merged back into
+// develop. The merge is a published release point on main's first-parent chain,
+// so whatever it was worth must be spent exactly once — re-entering it via the
+// back-merge must NOT bump develop again.
+//
+// A released main merge can double-count in TWO distinct ways, and the subtests
+// are grouped by WHICH one they exercise. Note what actually re-enters develop's
+// section (base..HEAD): the boundary is the merge's released tip (its second
+// parent), so everything INSIDE the merged branch — including an inner
+// "+semver:" commit — sits at or below the boundary and is EXCLUDED. Only the
+// merge commit itself re-enters.
+//
+// (1) The merge's implicit FEATURE-MINOR. This is the original bug. Because the
+// inner directive is never re-scanned (it is below the boundary), the InnerCommit*
+// group ALL exercise this single mechanism: the "+semver:" level on the inner
+// commit only changes the boundary CORE (major -> 1.0.0, minor/patch -> 0.3.0),
+// while the thing neutralized is always the feature merge's minor. They are
+// therefore three boundary-core variants of one path, not three distinct paths;
+// an inner directive is only a FLOOR, so InnerCommitPatch does NOT cap main down
+// (it stays 0.3.0), unlike the exact merge-message patch below.
+//
+//   - InnerCommitMajor: inner major -> main 1.0.0, develop 1.0.1-alpha.2.
+//   - InnerCommitMinor: inner minor (redundant with feature-minor) -> main 0.3.0,
+//     develop 0.3.1-alpha.2.
+//   - InnerCommitPatch: inner patch (floor, does not cap) -> main 0.3.0, develop
+//     0.3.1-alpha.2.
+//
+// (2) The merge commit's OWN "+semver:" directive. This is the residual bug the
+// merge-message fix addresses: the directive rides on the merge commit, which
+// DOES sit in develop's section above the boundary, so neutralizing a released
+// main merge's own directive (not just its feature-minor) is what prevents the
+// double-bump. A directive on a merge is EXACT (both floor and ceiling).
+//
+//   - MergeMessageMajor: exact major -> main 1.0.0, develop 1.0.1-alpha.2. Without
+//     the fix this double-bumps to 2.0.0.
+//   - MergeMessageMinor: exact minor -> main 0.3.0, develop 0.3.1-alpha.2. Without
+//     the fix this double-bumps to 0.4.0.
+//   - MergeMessagePatch: exact patch caps the feature-minor DOWN, so main reads
+//     0.2.1 and develop 0.2.2-alpha.2. This case is DEGENERATE as a regression
+//     guard — a re-applied patch cannot exceed the back-merge's own patch floor,
+//     so it passes even with the fix removed. It is kept to document the exact
+//     "+semver: patch" cap (the direct contrast to InnerCommitPatch: exact vs.
+//     floor) rather than to guard the fix.
+//
+// In every case the merge's bump is spent exactly once; develop advances only its
+// counter and the back-merge's own patch floor.
+func TestMajorMergedIntoMainThenBackMerged(t *testing.T) {
+	t.Parallel()
+
+	// setup releases develop into main (0.2.0) and returns the harness sitting on
+	// develop at that release, mirroring the minor-variant regression test.
+	setup := func(t *testing.T) *harness {
+		h := newHarness(t)
+		h.commit("root")
+		h.newBranch("develop")
+		h.commit("develop work +semver: minor")
+		h.checkout("main")
+		mg := h.merge("develop")
+		h.tag("0.2.0", mg)
+		h.want("0.2.0")
+		h.checkout("develop")
+		h.want("0.2.0-alpha.1")
+		return h
+	}
+
+	// A "+semver: major" on a commit INSIDE the merged feature branch. The inner
+	// commit is below the boundary and excluded from the section, so this does NOT
+	// test an inner directive being re-scanned; it exercises mechanism (1) — the
+	// feature merge's minor being neutralized — with the inner major only raising
+	// the boundary CORE to 1.0.0. Without the fix this re-applies the feature-minor
+	// and wrongly yields 1.1.0 (not 2.0.0).
+	t.Run("InnerCommitMajor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("feature work")
+		h.commit("breaking change +semver: major")
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("1.0.0") // major from the inner commit sets the boundary core, once
+
+		// Back-merge main into develop: the feature merge's minor is spent in
+		// 1.0.0, not re-applied. The back-merge commit is develop's only new work,
+		// a plain patch floor: 1.0.0 -> 1.0.1. The section holds the feature merge
+		// and the back-merge = 2 commits.
+		h.checkout("develop")
+		h.backMerge()
+		h.want("1.0.1-alpha.2")
+
+		h.commit("d1")
+		h.want("1.0.1-alpha.3")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.0.1")
+	})
+
+	// A "+semver: minor" on a commit INSIDE the feature branch — same mechanism as
+	// InnerCommitMajor (feature-minor neutralization), differing only in the
+	// boundary core. An inner directive is a FLOOR; a minor here is redundant with
+	// the automatic feature-minor, so main reads 0.3.0. Without the fix: 0.4.0.
+	t.Run("InnerCommitMinor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("feature work")
+		h.commit("small change +semver: minor")
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("0.3.0") // feature-minor floor (inner minor is redundant), once
+
+		h.checkout("develop")
+		h.backMerge()
+		h.want("0.3.1-alpha.2")
+
+		h.commit("d1")
+		h.want("0.3.1-alpha.3")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("0.3.1")
+	})
+
+	// A "+semver: patch" on a commit INSIDE the feature branch — again the
+	// feature-minor mechanism. Because an inner directive is only a FLOOR, it does
+	// NOT cap the feature-minor down (the direct contrast to MergeMessagePatch,
+	// where an EXACT directive on the merge commit caps to 0.2.1): the feature-minor
+	// wins, so main reads 0.3.0. Without the fix: 0.4.0.
+	t.Run("InnerCommitPatch", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("feature work")
+		h.commit("tiny change +semver: patch")
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("0.3.0") // feature-minor floor beats the inner patch, once
+
+		h.checkout("develop")
+		h.backMerge()
+		h.want("0.3.1-alpha.2")
+
+		h.commit("d1")
+		h.want("0.3.1-alpha.3")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("0.3.1")
+	})
+
+	// A "+semver: major" on the MERGE commit's OWN message (an exact major override
+	// on a direct merge into main). This exercises mechanism (2): the directive
+	// rides on the merge commit, which re-enters develop's section via the
+	// back-merge, so its spent bump must be neutralized too. Without the fix,
+	// develop double-bumps to 2.0.0.
+	t.Run("MergeMessageMajor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("feature work")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: major")
+		h.want("1.0.0") // exact major from the merge message, applied once
+
+		// Back-merge into develop must not re-apply the merge's own major: the
+		// back-merge contributes only a patch floor over 1.0.0 -> 1.0.1.
+		h.checkout("develop")
+		h.backMerge()
+		h.want("1.0.1-alpha.2")
+
+		h.commit("d1")
+		h.want("1.0.1-alpha.3")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.0.1")
+	})
+
+	// A "+semver: minor" on the MERGE commit's OWN message — mechanism (2) at the
+	// minor level. The exact minor matches the implicit feature-minor, so main
+	// reads 0.3.0; the directive is spent, so the back-merge does not re-apply it:
+	// develop reads 0.3.1-alpha.2. Without the fix, develop double-bumps to 0.4.0.
+	t.Run("MergeMessageMinor", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("feature work")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: minor")
+		h.want("0.3.0") // exact minor from the merge message, applied once
+
+		h.checkout("develop")
+		h.backMerge()
+		h.want("0.3.1-alpha.2")
+
+		h.commit("d1")
+		h.want("0.3.1-alpha.3")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("0.3.1")
+	})
+
+	// A "+semver: patch" on the MERGE commit's OWN message. The directive is EXACT
+	// on a merge, so it CAPS the automatic feature-minor DOWN to a patch: main
+	// reads 0.2.1, not 0.3.0. That capped patch is a spent release point, so the
+	// back-merge does not re-apply it — develop reads 0.2.2-alpha.2 (only the
+	// back-merge's own patch floor over 0.2.1). NOTE: this case is DEGENERATE as a
+	// regression guard — a re-applied patch cannot exceed the back-merge's own
+	// patch floor, so it passes even with the fix removed. It is kept to document
+	// the exact-patch cap (the contrast to InnerCommitPatch's floor), not to guard
+	// the fix; MergeMessageMajor/Minor are the merge-message regression guards.
+	t.Run("MergeMessagePatch", func(t *testing.T) {
+		t.Parallel()
+		h := setup(t)
+
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("feature work")
+		h.checkout("main")
+		h.mergeMsg("feature/x", "Merge branch 'feature/x'\n\n+semver: patch")
+		h.want("0.2.1") // exact patch caps the feature-minor down, applied once
+
+		h.checkout("develop")
+		h.backMerge()
+		h.want("0.2.2-alpha.2")
+
+		h.commit("d1")
+		h.want("0.2.2-alpha.3")
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("0.2.2")
 	})
 }
 
@@ -4192,14 +4508,16 @@ func TestMultipleUntaggedMergesIntoMain(t *testing.T) {
 	h.merge("feature/three")
 	h.want("0.3.0") // three direct merges accumulated: minor, patch, minor
 
-	// Downstream: a develop branch created off main. develop's reachable section
-	// still includes the feature/three merge at its boundary, so the section sees
-	// a feature merge and floors at minor: 0.3.0 -> 0.4.0. A develop commit only
-	// advances the counter.
+	// Downstream: a develop branch created off main. The feature/three merge at
+	// the section boundary is a published release point on main's first-parent
+	// chain, so its minor is already spent in 0.3.0 and is NOT re-applied to
+	// develop (which would double-bump to 0.4.0). develop's only section commit
+	// is that merge itself, which contributes a plain patch floor: 0.3.0 -> 0.3.1.
+	// A develop commit only advances the counter.
 	h.newBranch("develop")
-	h.want("0.4.0-alpha.1")
+	h.want("0.3.1-alpha.1")
 	h.commit("d1")
-	h.want("0.4.0-alpha.2")
+	h.want("0.3.1-alpha.2")
 
 	// Downstream: another feature branch derives its minor from develop's core.
 	h.newBranch("feature/x")

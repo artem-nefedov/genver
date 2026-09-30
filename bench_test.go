@@ -154,3 +154,87 @@ func benchmarkFeatureWithDevelopMerged(b *testing.B, developMerges int) {
 func BenchmarkFeatureWithDevelopMerged20(b *testing.B)  { benchmarkFeatureWithDevelopMerged(b, 20) }
 func BenchmarkFeatureWithDevelopMerged50(b *testing.B)  { benchmarkFeatureWithDevelopMerged(b, 50) }
 func BenchmarkFeatureWithDevelopMerged100(b *testing.B) { benchmarkFeatureWithDevelopMerged(b, 100) }
+
+// buildFeatureMergesOnMainBackMergedRepo builds the exact topology the
+// released-main-merge fix targets: MANY feature branches merged DIRECTLY into
+// main (so main's first-parent chain is a long run of feature-merge commits, all
+// recorded in releasedMainMerges), after which main is merged back into develop.
+// Computing the version on develop then walks a section that contains every one
+// of those released feature merges, so it exercises both halves of the fix at
+// scale:
+//
+//   - developBoundaries populates releasedMainMerges by scanning main's whole
+//     first-parent chain — cost grows with featureMerges.
+//   - scanRange -> explicitCommitBump does a releasedMainMerges lookup for each
+//     of those merges in the develop section (and, in the unfixed code, would
+//     instead call featureMergeBump on each). This is where a double-minor would
+//     otherwise be computed, so it is the path whose behavior the fix changed.
+//
+// featureMerges controls how many feature merges land directly on main (and thus
+// the length of main's first-parent chain and the size of develop's section).
+func buildFeatureMergesOnMainBackMergedRepo(tb testing.TB, featureMerges int) *harness {
+	h := newHarnessNamed(tb, "main")
+	h.commit("root")
+
+	// A develop branch exists (the version is computed on it) and is released
+	// once so there is a tagged boundary below the run of direct main merges.
+	h.newBranch("develop")
+	h.commit("d1")
+	h.checkout("main")
+	mg := h.merge("develop")
+	h.tag("0.1.0", mg)
+
+	// Many feature branches cut directly from main and merged straight back into
+	// main. Each merge commit lands on main's own first-parent chain and advances
+	// main's release core by a minor.
+	h.checkout("main")
+	for i := range featureMerges {
+		br := fmt.Sprintf("feature/on-main-%d", i)
+		h.newBranch(br)
+		h.commit(fmt.Sprintf("m%d-a", i))
+		h.commit(fmt.Sprintf("m%d-b", i))
+		h.checkout("main")
+		h.merge(br)
+	}
+
+	// Merge the advanced main back INTO develop: every direct feature merge now
+	// re-enters develop's section, where explicitCommitBump must recognize each as
+	// an already-released main merge and NOT re-apply its minor.
+	h.checkout("develop")
+	h.merge("main")
+	return h
+}
+
+func benchmarkFeatureMergesOnMainBackMerged(b *testing.B, featureMerges int) {
+	h := buildFeatureMergesOnMainBackMergedRepo(b, featureMerges)
+	branch, err := h.g.headBranch()
+	if err != nil {
+		b.Fatal(err)
+	}
+	head, err := h.g.headCommit()
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		h.g.fpChainCache = nil // fresh process would not have a warm chain cache
+		calc, err := newCalculator(h.g)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := calc.Calculate(branch, head); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFeatureMergesOnMainBackMerged20(b *testing.B) {
+	benchmarkFeatureMergesOnMainBackMerged(b, 20)
+}
+func BenchmarkFeatureMergesOnMainBackMerged50(b *testing.B) {
+	benchmarkFeatureMergesOnMainBackMerged(b, 50)
+}
+func BenchmarkFeatureMergesOnMainBackMerged100(b *testing.B) {
+	benchmarkFeatureMergesOnMainBackMerged(b, 100)
+}

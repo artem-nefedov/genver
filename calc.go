@@ -46,7 +46,20 @@ type calculator struct {
 	refs       map[plumbing.Hash]prereleaseRef // commit hash -> prerelease reference tag
 	conflicts  map[plumbing.Hash]error         // tagged commit hash -> ambiguity error (lazy)
 	msgBumps   map[plumbing.Hash]bumpKind      // commit hash -> parsed "+semver:" bump (memo)
-	trace      io.Writer                       // nil disables tracing
+
+	// releasedMainMerges is the set of merge commits sitting on the main
+	// (permanent release) branch's own first-parent chain. Each such merge is an
+	// already-published release point: its version contribution (a feature
+	// merge's minor, a bugfix's patch, an explicit "+semver:" directive on its
+	// own message, or a develop release) is already baked into the release
+	// boundary it produced (registered at its second parent). When one of these
+	// merges later RE-ENTERS a develop/branch section via a back-merge ("git
+	// merge main"), its own bump must not be applied a second time on top of the
+	// boundary it already produced. Used by explicitCommitBump to neutralize such
+	// a merge's spent bump exactly once.
+	releasedMainMerges map[plumbing.Hash]bool
+
+	trace io.Writer // nil disables tracing
 }
 
 // msgBump returns the "+semver:" bump encoded in a commit's message, memoized by
@@ -199,6 +212,19 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 	chain, err := c.g.firstParentChain(mainCommit) // newest first
 	if err != nil {
 		return nil, err
+	}
+
+	// Record every merge commit on main's own first-parent chain. These are the
+	// repository's published release points; each one's version bump is already
+	// captured by the boundary it produces (its second parent). Marking them lets
+	// explicitCommitBump neutralize such a merge's spent bump exactly once, so a
+	// back-merge of main into develop does not re-apply it (the reported
+	// 0.3.0 -> 0.4.0 feature-minor and 1.0.0 -> 2.0.0 "+semver: major" bugs).
+	c.releasedMainMerges = map[plumbing.Hash]bool{}
+	for _, cm := range chain {
+		if cm.NumParents() >= 2 {
+			c.releasedMainMerges[cm.Hash] = true
+		}
 	}
 
 	// Always include the root at 0.1.0 (a no-op if it was already tagged).
@@ -704,7 +730,21 @@ func firstParentChainContains(start, target plumbing.Hash, pool map[plumbing.Has
 // the merged-in feature branch actually resolves to (which a reference tag on
 // that branch's tip may have capped to patch). No patch floor is applied here;
 // an ordinary commit contributes bumpNone.
+//
+// A merge that sits on main's own first-parent chain (a published release point)
+// contributes NO explicit bump at all: whatever it was worth — a feature merge's
+// implicit minor, or an explicit "+semver:" directive on its OWN message — is
+// already baked into the release boundary the merge produced. Without this, a
+// back-merge of main into develop ("git merge main") after such a merge landed
+// directly on main would re-apply that bump on top of the boundary it already
+// produced: a feature merge would double-bump 0.3.0 -> 0.4.0, and a
+// "+semver: major" release merge would double-bump 1.0.0 -> 2.0.0. The merge's
+// introduced commits sit below that boundary, so they are excluded from the
+// section anyway; only the merge commit itself needs its spent bump neutralized.
 func (c *calculator) explicitCommitBump(commit *object.Commit) (bumpKind, error) {
+	if c.releasedMainMerges[commit.Hash] {
+		return bumpNone, nil
+	}
 	b := c.msgBump(commit)
 	if isFeatureMerge(commit) {
 		fb, err := c.featureMergeBump(commit)

@@ -53,10 +53,14 @@ type calculator struct {
 	// merge's minor, a bugfix's patch, an explicit "+semver:" directive on its
 	// own message, or a develop release) is already baked into the release
 	// boundary it produced (registered at its second parent). When one of these
-	// merges later RE-ENTERS a develop/branch section via a back-merge ("git
-	// merge main"), its own bump must not be applied a second time on top of the
-	// boundary it already produced. Used by explicitCommitBump to neutralize such
-	// a merge's spent bump exactly once.
+	// merges later RE-ENTERS a section, explicitCommitBump neutralizes its bump —
+	// but ONLY when the section's base core already reflects it (base >= the
+	// merge's produced core). That is the back-merge-into-develop case ("git merge
+	// main"), where the base IS the merge's tip, so re-applying its bump would
+	// double-count. When the base is an OLDER release (a short-lived branch forked
+	// before the merge, into which the integration branch is merged down), the
+	// section has not absorbed the merge yet and its bump is inherited normally —
+	// suppressing it there would DROP the bump.
 	releasedMainMerges map[plumbing.Hash]bool
 
 	trace io.Writer // nil disables tracing
@@ -450,7 +454,7 @@ func (c *calculator) scanSectionInPool(start plumbing.Hash, excludeStart bool, p
 
 	// Analyse base..start in a single walk: count, bump, and any reference tag.
 	exclude := ancestorHashesIn(res.baseHash, pool)
-	rs, err := c.scanRange(start, exclude, pool)
+	rs, err := c.scanRange(start, exclude, pool, res.baseCore)
 	if err != nil {
 		return sectionScan{}, err
 	}
@@ -464,7 +468,7 @@ func (c *calculator) scanSectionInPool(start plumbing.Hash, excludeStart bool, p
 	// consumers via max(baseCore, refAnchor)). The after-tag bump needs its own
 	// walk because its range (tag..start) differs from the section's.
 	if rs.hasRef {
-		lift, aerr := c.anchorLiftBump(start, rs.nearestHash, pool)
+		lift, aerr := c.anchorLiftBump(start, rs.nearestHash, pool, res.baseCore)
 		if aerr != nil {
 			return sectionScan{}, aerr
 		}
@@ -507,7 +511,11 @@ type rangeScan struct {
 // nesting (the lowest wins along a path) but a commit also reachable by an
 // independent, un-capped path keeps its full weight. The commit COUNT is never
 // affected — every commit in the range is counted once.
-func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash) (rangeScan, error) {
+//
+// baseCore is the release core the range builds on; it is passed to
+// explicitCommitBump so a released main merge's spent bump is neutralized only
+// when the base already reflects it (see explicitCommitBump).
+func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bool, pool map[plumbing.Hash][]plumbing.Hash, baseCore core) (rangeScan, error) {
 	ceilings, err := c.computeCeilings(start, exclude, pool)
 	if err != nil {
 		return rangeScan{}, err
@@ -541,7 +549,7 @@ func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bo
 			if err != nil {
 				return rangeScan{}, err
 			}
-			explicit, berr := c.explicitCommitBump(commit)
+			explicit, berr := c.explicitCommitBump(commit, baseCore)
 			if berr != nil {
 				return rangeScan{}, berr
 			}
@@ -613,7 +621,7 @@ func (c *calculator) scanRange(start plumbing.Hash, exclude map[plumbing.Hash]bo
 // on the merge message is a deliberate override and still lifts, and a nested
 // feature merge that brought in an independent branch (the anchor is NOT on the
 // merged side's first-parent chain) keeps its full weight.
-func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) (bumpKind, error) {
+func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash, baseCore core) (bumpKind, error) {
 	afterExclude := ancestorHashesIn(anchorHash, pool)
 	// desc answers "is the anchor an ancestor of h?" (i.e. h builds on the tag),
 	// memoized once and reused by both the lift walk and integratesAnchor so the
@@ -646,7 +654,7 @@ func (c *calculator) anchorLiftBump(start, anchorHash plumbing.Hash, pool map[pl
 				// explicit "+semver:" directive but not its implicit feature-minor.
 				b = c.msgBump(commit)
 			} else {
-				b, err = c.explicitCommitBump(commit)
+				b, err = c.explicitCommitBump(commit, baseCore)
 				if err != nil {
 					return bumpNone, err
 				}
@@ -731,19 +739,34 @@ func firstParentChainContains(start, target plumbing.Hash, pool map[plumbing.Has
 // that branch's tip may have capped to patch). No patch floor is applied here;
 // an ordinary commit contributes bumpNone.
 //
-// A merge that sits on main's own first-parent chain (a published release point)
-// contributes NO explicit bump at all: whatever it was worth — a feature merge's
-// implicit minor, or an explicit "+semver:" directive on its OWN message — is
-// already baked into the release boundary the merge produced. Without this, a
+// baseCore is the release core the section being scanned builds on. A merge that
+// sits on main's own first-parent chain (a published release point) contributes
+// NO explicit bump — whatever it was worth (a feature merge's implicit minor, or
+// an explicit "+semver:" directive on its OWN message) is already baked into the
+// release boundary it produced — but ONLY when that produced core is at or below
+// baseCore, i.e. the section's base already reflects it. Without this, a
 // back-merge of main into develop ("git merge main") after such a merge landed
 // directly on main would re-apply that bump on top of the boundary it already
 // produced: a feature merge would double-bump 0.3.0 -> 0.4.0, and a
-// "+semver: major" release merge would double-bump 1.0.0 -> 2.0.0. The merge's
-// introduced commits sit below that boundary, so they are excluded from the
-// section anyway; only the merge commit itself needs its spent bump neutralized.
-func (c *calculator) explicitCommitBump(commit *object.Commit) (bumpKind, error) {
+// "+semver: major" release merge would double-bump 1.0.0 -> 2.0.0.
+//
+// When the merge's produced core is ABOVE baseCore, however, the section has NOT
+// yet absorbed it: this happens when main (carrying the merge) is merged down
+// into a short-lived branch whose fork point sits at an older release. There the
+// branch must INHERIT the merge's bump, so it is counted normally. Suppressing it
+// unconditionally would drop the bump (e.g. a "+semver: major" merge on main
+// merged into a feature branch forked at 0.39.5 would collapse 1.0.0 -> 0.40.0).
+func (c *calculator) explicitCommitBump(commit *object.Commit, baseCore core) (bumpKind, error) {
 	if c.releasedMainMerges[commit.Hash] {
-		return bumpNone, nil
+		if mc, ok, _, err := c.mergeBoundary(commit); err != nil {
+			return bumpNone, err
+		} else if ok && !less(baseCore, mc) {
+			// The section base already reflects this merge's produced core, so its
+			// bump is spent: neutralize it to avoid double-counting.
+			return bumpNone, nil
+		}
+		// Produced core is above the base: the section has not absorbed it yet, so
+		// fall through and count the merge's bump so the section inherits it.
 	}
 	b := c.msgBump(commit)
 	if isFeatureMerge(commit) {
@@ -1080,7 +1103,7 @@ func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error)
 		return core{}, err
 	}
 	exclude := ancestorHashesIn(p0.Hash, pool)
-	rs, err := c.scanRange(p1.Hash, exclude, pool)
+	rs, err := c.scanRange(p1.Hash, exclude, pool, base)
 	if err != nil {
 		return core{}, err
 	}
@@ -1101,7 +1124,7 @@ func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error)
 		return scan.core(bumpNone), nil
 	}
 	if rs.hasRef {
-		lift, aerr := c.anchorLiftBump(p1.Hash, rs.nearestHash, pool)
+		lift, aerr := c.anchorLiftBump(p1.Hash, rs.nearestHash, pool, base)
 		if aerr != nil {
 			return core{}, aerr
 		}
@@ -1305,7 +1328,7 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	// bump and any reference tag among the branch's commits; the counter is scoped
 	// separately to the branch's own first-parent line (see below).
 	mbSet := ancestorHashesIn(mb.Hash, pool)
-	rs, err := c.scanRange(head.Hash, mbSet, pool)
+	rs, err := c.scanRange(head.Hash, mbSet, pool, belowCore)
 	if err != nil {
 		return core{}, "", 0, false, err
 	}
@@ -1338,7 +1361,7 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	for h := range walls {
 		countExclude[h] = true
 	}
-	cs, err := c.scanRange(head.Hash, countExclude, pool)
+	cs, err := c.scanRange(head.Hash, countExclude, pool, belowCore)
 	if err != nil {
 		return core{}, "", 0, false, err
 	}
@@ -1370,11 +1393,11 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 		for h := range countExclude {
 			afterExclude[h] = true
 		}
-		after, aerr := c.scanRange(head.Hash, afterExclude, pool)
+		after, aerr := c.scanRange(head.Hash, afterExclude, pool, belowCore)
 		if aerr != nil {
 			return core{}, "", 0, false, aerr
 		}
-		lift, lerr := c.anchorLiftBump(head.Hash, rs.nearestHash, pool)
+		lift, lerr := c.anchorLiftBump(head.Hash, rs.nearestHash, pool, belowCore)
 		if lerr != nil {
 			return core{}, "", 0, false, lerr
 		}

@@ -531,6 +531,134 @@ func TestScenarioDevelopMergedIntoBugfixMajor(t *testing.T) {
 	h.want("1.0.0-ABC-1000.2")
 }
 
+// TestMajorMergedIntoIntegrationThenDownMerged is the down-merge analogue of
+// TestMajorMergedIntoMainThenBackMerged. Here a MAJOR bump is published on an
+// integration branch (develop or, in the no-develop flow, main) by merging a
+// short-lived branch INTO it, and that integration branch is then merged BACK
+// DOWN into the same short-lived branch ("git merge develop" / "git merge main"
+// while on feature/bugfix). The branch must INHERIT the major exactly once:
+//
+//   - It must not DOUBLE-count (the merge's major applied a second time, e.g.
+//     1.0.0 -> 2.0.0).
+//   - It must not DROP the major (falling back to the branch's own minor/patch
+//     floor, e.g. collapsing 1.0.0 -> 0.40.0). This second failure is the one the
+//     base-core-aware neutralization guards against: the branch's fork point sits
+//     at an OLDER release than the integration branch's new major, so the
+//     released-merge's bump is NOT yet reflected in the branch's base and must be
+//     counted, unlike the back-merge-into-develop case where the base already
+//     absorbed it.
+//
+// Both major origins are exercised for both integration branches:
+//   - InnerCommit*: "+semver: major" on a commit INSIDE the merged branch — the
+//     branch's own work, reached from the branch tip directly.
+//   - MergeDirective*: "+semver: major" on the merge commit's OWN message — that
+//     merge commit sits on the integration branch's first-parent chain, so it is a
+//     released main/develop merge whose bump must still be inherited here.
+func TestMajorMergedIntoIntegrationThenDownMerged(t *testing.T) {
+	t.Parallel()
+
+	// develop flow: develop exists; the branch forks from develop, is merged into
+	// develop with a major, and develop is merged back down into it.
+	t.Run("DevelopInnerCommit", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("0.39.5")
+
+		const feat = "feature/big"
+		h.newBranch(feat)
+		h.commit("f1")
+		h.commit("breaking change +semver: major") // inner major (branch's own work)
+		h.want("1.0.0-big.2")
+
+		// Merge the feature branch into develop: develop publishes the major.
+		h.checkout("develop")
+		h.merge(feat)
+		h.want("1.0.0-alpha.3")
+
+		// Merge develop back down into the feature branch. The branch inherits the
+		// major exactly once (1.0.0), never 2.0.0 (double) or 0.40.0 (dropped).
+		h.checkout(feat)
+		h.merge("develop")
+		h.want("1.0.0-big.3")
+	})
+
+	t.Run("DevelopMergeDirective", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("0.39.5")
+
+		const feat = "feature/big"
+		h.newBranch(feat)
+		h.commit("f1")
+		h.want("0.40.0-big.1") // feature floor before the merge
+
+		// Merge into develop with an exact "+semver: major" on the merge message.
+		h.checkout("develop")
+		h.mergeMsg(feat, "Merge branch 'feature/big'\n\n+semver: major")
+		h.want("1.0.0-alpha.2")
+
+		// The major rides on the develop-mainline merge commit. Merging develop
+		// back down must inherit it exactly once: 1.0.0, not 2.0.0 or 0.40.0.
+		h.checkout(feat)
+		h.merge("develop")
+		h.want("1.0.0-big.2")
+	})
+
+	// no-develop flow: short-lived branches fork directly from main; main is the
+	// integration branch and is merged back down into the branch.
+	t.Run("MainInnerCommit", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("0.39.5", mustHead(t, h))
+
+		const feat = "feature/big"
+		h.newBranch(feat)
+		h.commit("f1")
+		h.commit("breaking change +semver: major") // inner major
+		h.want("1.0.0-big.2")
+
+		h.checkout("main")
+		h.merge(feat)
+		h.want("1.0.0")
+
+		h.checkout(feat)
+		h.merge("main")
+		h.want("1.0.0-big.3")
+	})
+
+	// The regression case: a "+semver: major" on the MERGE commit's own message
+	// on main, then main merged back down into the branch. The major rides on
+	// main's first-parent chain (a released main merge), and the branch's fork
+	// point sits at the older 0.39.5 release, so the branch must INHERIT the major
+	// (1.0.0). Before the base-core-aware guard this wrongly dropped to 0.40.0.
+	t.Run("MainMergeDirective", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("0.39.5", mustHead(t, h))
+
+		const feat = "feature/big"
+		h.newBranch(feat)
+		h.commit("f1")
+		h.want("0.40.0-big.1")
+
+		h.checkout("main")
+		h.mergeMsg(feat, "Merge branch 'feature/big'\n\n+semver: major")
+		h.want("1.0.0")
+
+		h.checkout(feat)
+		h.merge("main")
+		h.want("1.0.0-big.2")
+	})
+}
+
 // TestScenarioDevelopMergedIntoFeatureKeepsMinor covers merging develop back
 // INTO a feature branch when develop only had patch commits. A feature branch's
 // increment is floored at minor regardless, so the patch-only develop merge must

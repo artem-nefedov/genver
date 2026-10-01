@@ -63,7 +63,8 @@ func benchmarkAnchorLift(b *testing.B, mergesAfter int) {
 	for i := 0; i < b.N; i++ {
 		// A fresh calculator each iteration: mirrors a real invocation and avoids
 		// cross-iteration memo reuse (the memo is per anchorLiftBump call anyway).
-		h.g.fpChainCache = nil // fresh process would not have a warm chain cache
+		h.g.fpChainCache = nil    // fresh process would not have a warm chain cache
+		h.g.parentPoolCache = nil // nor a warm parent-pool cache
 		calc, err := newCalculator(h.g)
 		if err != nil {
 			b.Fatal(err)
@@ -140,7 +141,8 @@ func benchmarkFeatureWithDevelopMerged(b *testing.B, developMerges int) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h.g.fpChainCache = nil // fresh process would not have a warm chain cache
+		h.g.fpChainCache = nil    // fresh process would not have a warm chain cache
+		h.g.parentPoolCache = nil // nor a warm parent-pool cache
 		calc, err := newCalculator(h.g)
 		if err != nil {
 			b.Fatal(err)
@@ -218,7 +220,8 @@ func benchmarkFeatureMergesOnMainBackMerged(b *testing.B, featureMerges int) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		h.g.fpChainCache = nil // fresh process would not have a warm chain cache
+		h.g.fpChainCache = nil    // fresh process would not have a warm chain cache
+		h.g.parentPoolCache = nil // nor a warm parent-pool cache
 		calc, err := newCalculator(h.g)
 		if err != nil {
 			b.Fatal(err)

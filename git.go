@@ -65,6 +65,13 @@ type repo struct {
 	// both forkBase and permanentMainlineWalls, and decoding a long mainline is
 	// not free, so caching avoids re-walking the same chain twice.
 	fpChainCache map[plumbing.Hash][]*object.Commit
+
+	// parentPoolCache memoizes parentPool results by start hash within a single
+	// invocation. The reachability pool from a given commit (typically HEAD) is
+	// consulted by several independent steps — section scans, counters, and the
+	// reachable-release floor — so caching avoids re-walking the whole reachable
+	// history each time. The returned map must be treated as read-only by callers.
+	parentPoolCache map[plumbing.Hash]map[plumbing.Hash][]plumbing.Hash
 }
 
 // logf writes a timestamped trace line when tracing is enabled (a no-op
@@ -563,6 +570,9 @@ func (g *repo) mergeBase(a, b *object.Commit) (*object.Commit, error) {
 // walk backs every reachability, ancestor-set, and section-counting question, so
 // the history is loaded at most once.
 func (g *repo) parentPool(start plumbing.Hash) (map[plumbing.Hash][]plumbing.Hash, error) {
+	if cached, ok := g.parentPoolCache[start]; ok {
+		return cached, nil
+	}
 	pool := map[plumbing.Hash][]plumbing.Hash{}
 	stack := []plumbing.Hash{start}
 	for len(stack) > 0 {
@@ -583,6 +593,10 @@ func (g *repo) parentPool(start plumbing.Hash) (map[plumbing.Hash][]plumbing.Has
 			}
 		}
 	}
+	if g.parentPoolCache == nil {
+		g.parentPoolCache = map[plumbing.Hash]map[plumbing.Hash][]plumbing.Hash{}
+	}
+	g.parentPoolCache[start] = pool
 	return pool, nil
 }
 

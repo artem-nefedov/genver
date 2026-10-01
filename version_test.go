@@ -628,16 +628,17 @@ func TestMajorMergedIntoIntegrationThenDownMerged(t *testing.T) {
 		h.merge(feat)
 		h.want("1.0.0")
 
+		// After the merge the branch's tip is a released boundary (1.0.0). The
+		// down-merge of main counts as new work, so the branch predicts main's
+		// NEXT merge: a plain feature-minor over 1.0.0 (the inner major was a
+		// one-time directive, already consumed) -> 1.1.0.
 		h.checkout(feat)
 		h.merge("main")
-		h.want("1.0.0-big.3")
+		h.want("1.1.0-big.1")
 	})
 
-	// The regression case: a "+semver: major" on the MERGE commit's own message
-	// on main, then main merged back down into the branch. The major rides on
-	// main's first-parent chain (a released main merge), and the branch's fork
-	// point sits at the older 0.39.5 release, so the branch must INHERIT the major
-	// (1.0.0). Before the base-core-aware guard this wrongly dropped to 0.40.0.
+	// A "+semver: major" on the MERGE commit's own message on main, then main
+	// merged back down into the branch.
 	t.Run("MainMergeDirective", func(t *testing.T) {
 		t.Parallel()
 		h := newHarness(t)
@@ -653,9 +654,772 @@ func TestMajorMergedIntoIntegrationThenDownMerged(t *testing.T) {
 		h.mergeMsg(feat, "Merge branch 'feature/big'\n\n+semver: major")
 		h.want("1.0.0")
 
+		// The down-merge counts as new work and predicts main's next merge: a
+		// plain feature-minor over 1.0.0 -> 1.1.0 (the one-time major directive is
+		// already consumed into main's 1.0.0).
 		h.checkout(feat)
 		h.merge("main")
-		h.want("1.0.0-big.2")
+		h.want("1.1.0-big.1")
+	})
+}
+
+// TestRepeatedSameFeatureMergeIntoMainBumpsEachTime documents a deliberate
+// property of the direct-merge-into-main flow: each merge of a feature/ branch
+// into main bumps minor once, keyed off the merge commit's MESSAGE — so merging
+// the SAME feature branch into main multiple times bumps minor every time, even
+// when a particular merge introduces no new branch commits.
+//
+// NOTE: this path is NOT ADVISED for users. In normal git-flow a short-lived
+// branch is merged once and deleted; re-merging the same branch inflates main's
+// minor without corresponding new work. The behavior is intentional and kept for
+// predictability (a merge's nature is derived solely from its message, never from
+// what it happens to introduce), but it is documented here precisely so the
+// inflation is a known, tested consequence rather than a surprise.
+func TestRepeatedSameFeatureMergeIntoMainBumpsEachTime(t *testing.T) {
+	t.Parallel()
+
+	// Re-merging the same branch WITH new work between each merge: every merge is
+	// a feature merge -> minor, so the minors accumulate 0.40.0 -> 0.41.0 -> ...
+	t.Run("NewWorkBetween", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("0.39.5", mustHead(t, h))
+
+		const feat = "feature/big"
+		h.newBranch(feat)
+		h.commit("f1")
+		h.checkout("main")
+		h.merge(feat)
+		h.want("0.40.0") // 1st feature merge: minor
+
+		h.checkout(feat)
+		h.commit("f2")
+		h.checkout("main")
+		h.merge(feat)
+		h.want("0.41.0") // 2nd feature merge: another minor
+
+		h.checkout(feat)
+		h.commit("f3")
+		h.checkout("main")
+		h.merge(feat)
+		h.want("0.42.0") // 3rd feature merge: another minor
+	})
+
+	// Re-merging the same branch with NO new work between merges still bumps:
+	// the merge commit's message makes it a feature merge, so main bumps minor
+	// even though the second merge introduces no new branch commits. This is the
+	// clearest illustration of why the path is not advised.
+	t.Run("NoNewWorkBetween", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("0.39.5", mustHead(t, h))
+
+		const feat = "feature/big"
+		h.newBranch(feat)
+		h.commit("f1")
+		h.checkout("main")
+		h.merge(feat)
+		h.want("0.40.0")
+
+		// Second merge of the same branch tip: no new feature commits, yet the
+		// feature-merge message still bumps main's minor. NOT ADVISED.
+		h.checkout("main")
+		h.merge(feat)
+		h.want("0.41.0")
+	})
+}
+
+// TestBackMergeKeepsFeatureCoreAtLeastMainCore exercises the full round trip of
+// the not-advised repeated-merge path together with back-merges, and asserts
+// that a non-main/non-develop branch shows the "upcoming" core — the core the
+// integration branch will have once the branch is merged — and never lags behind
+// main's released core:
+//
+//  1. main is bumped correctly — one minor per feature merge (the documented
+//     behavior from TestRepeatedSameFeatureMergeIntoMainBumpsEachTime).
+//  2. the branch PREDICTS main's next state. Once the branch's own commit has
+//     been merged (and released) it becomes a boundary on the branch's own line;
+//     the commit used for that merge is "spent" (no re-bump, so the branch sits
+//     exactly at main's released core with counter 0). New work AFTER that merge
+//     — including a back-merge of main, which counts as new work — re-asserts the
+//     branch's minor and predicts main's NEXT release. So after a back-merge the
+//     branch reads one minor above main (e.g. main 0.40.0 -> branch 0.41.0),
+//     which is exactly what main becomes when the branch is merged again.
+func TestBackMergeKeepsFeatureCoreAtLeastMainCore(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.commit("c0")
+	h.tag("0.39.5", mustHead(t, h))
+
+	const feat = "feature/big"
+	h.newBranch(feat)
+	h.commit("f1")
+	h.want("0.40.0-big.1") // predicts main's first merge (0.39.5 -> 0.40.0)
+
+	// 1st merge into main -> 0.40.0. On the branch, f1 is now a released boundary:
+	// sitting exactly on it (no new work) the branch is 0.40.0 with counter 0.
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.40.0")
+	h.checkout(feat)
+	h.want("0.40.0-big.0") // at the released boundary, merge spent, no re-bump
+
+	// A back-merge of main counts as new work, so the branch re-asserts its minor
+	// and predicts main's NEXT merge: 0.41.0.
+	h.merge("main")
+	h.want("0.41.0-big.1")
+
+	// 2nd merge of the same branch -> main 0.41.0 (the predicted value).
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.41.0")
+	h.checkout(feat)
+	h.merge("main")
+	h.want("0.42.0-big.1") // back-merge again predicts the next merge: 0.42.0
+
+	// 3rd merge after real new branch work -> main 0.42.0; the branch keeps
+	// predicting the next state.
+	h.checkout(feat)
+	h.commit("f2")
+	h.want("0.42.0-big.2") // new work continues the already-predicted 0.42.0
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.42.0")
+	h.checkout(feat)
+	h.merge("main")
+	h.want("0.43.0-big.1") // predicts the next merge: 0.43.0
+}
+
+// TestRepeatedFeatureIntoMainThenBackmergeDevelopKeepsDevelopCore covers the
+// flow where a develop branch EXISTS, but a feature branch is merged DIRECTLY
+// into main (bypassing develop), and after each such main merge, main is merged
+// back into develop ("git merge main"). This repeats with the SAME feature
+// branch more than once.
+//
+// It asserts two things at every step:
+//
+//  1. main is bumped correctly — one minor per feature merge (the documented,
+//     not-advised repeated-same-branch-into-main behavior).
+//  2. develop's core NEVER LAGS behind main's released core once main is merged
+//     back into it. This is the subtle case: merging the SAME feature tip into
+//     main twice registers only ONE release boundary (both merges share that tip
+//     as their released second parent), so the second release (0.41.0) has no
+//     distinct boundary commit. Earlier develop therefore stayed at 0.40.1 while
+//     main was at 0.41.0; the mainVersion-based floor recovers main's true core.
+func TestRepeatedFeatureIntoMainThenBackmergeDevelopKeepsDevelopCore(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+
+	// develop exists, with one release cut so there is a tagged boundary.
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5")
+	h.want("0.39.5-alpha.1") // develop at the release
+
+	// Feature branch cut directly from main.
+	const feat = "feature/big"
+	h.checkout("main")
+	h.newBranch(feat)
+	h.commit("f1")
+
+	// 1st: feature merged DIRECTLY into main -> 0.40.0; back-merge into develop.
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.40.0")
+	h.checkout("develop")
+	h.merge("main")
+	h.want("0.40.1-alpha.2") // develop builds on main's 0.40.0 (patch floor)
+
+	// 2nd: SAME feature merged into main again -> 0.41.0 (minor per merge, the
+	// not-advised path). Back-merge into develop: develop must RISE to at least
+	// main's 0.41.0 core, NOT stay at 0.40.1. The 0.41.0 release has no distinct
+	// boundary commit (same feature tip as the 1st merge), so this exercises the
+	// mainVersion-based floor.
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.41.0")
+	h.checkout("develop")
+	h.merge("main")
+	h.want("0.41.0-alpha.4") // core tracks main's 0.41.0, never below it
+
+	// 3rd: add real feature work, merge into main -> 0.42.0, back-merge again.
+	h.checkout(feat)
+	h.commit("f2")
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.42.0")
+	h.checkout("develop")
+	h.merge("main")
+	h.want("0.42.1-alpha.6") // core tracks main's 0.42.0, never below it
+}
+
+// TestCombinedReusedFeatureAllMergePatterns is an integration test that weaves
+// together every merge pattern the preceding focused tests cover, reusing the
+// SAME feature branch throughout. The feature is forked from MAIN, so it is
+// versioned relative to main (fork-origin parent selection) and shows main's
+// "upcoming" core — what main becomes once the branch is merged:
+//
+//   - Phase 1: feature merged DIRECTLY into main, then main back-merged into
+//     develop.
+//   - Phase 2: the same feature advanced and merged DIRECTLY into main again,
+//     then main back-merged into the FEATURE branch.
+//   - Phase 3: the same feature merged into develop, develop released into main,
+//     then main back-merged into develop.
+//   - Phase 4: the same feature reused once more, merged DIRECTLY into main, then
+//     main back-merged into both develop and the feature branch.
+//
+// Invariants checked at every step:
+//   - the branch shows its parent's (main's) UPCOMING core: its own merged commit
+//     is a spent boundary (no re-bump sitting on it), while new work — including a
+//     back-merge of main, which counts as new work — predicts main's next merge;
+//   - develop/the branch never lags behind a release it actually contains, but a
+//     merge elsewhere never changes a branch that gained no commits of its own
+//     (e.g. phase 4: develop stays 0.42.1 while main advances to 0.43.0, until
+//     develop itself is back-merged).
+func TestCombinedReusedFeatureAllMergePatterns(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+
+	// Setup: main + develop, one release so there is a tagged boundary (0.39.5).
+	h.commit("c0")
+	h.newBranch("develop")
+	h.commit("d0")
+	h.release("0.39.5")
+	h.want("0.39.5-alpha.1")
+
+	const feat = "feature/reused"
+
+	// --- Phase 1: direct merge into main, then back-merge main into develop. ---
+	h.checkout("main")
+	h.newBranch(feat)
+	h.commit("f1")
+	h.want("0.40.0-reused.1") // forked from main -> predicts main's next (0.40.0)
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.40.0") // feature merge #1 on main: minor
+	h.checkout("develop")
+	h.merge("main")
+	h.want("0.40.1-alpha.2") // develop builds on main's 0.40.0 (never below it)
+
+	// --- Phase 2: reuse the feature, direct merge into main, back-merge into the
+	// FEATURE branch. ---
+	h.checkout(feat)
+	h.commit("f2")
+	h.want("0.41.0-reused.1") // f1 is now a spent boundary (0.40.0); f2 predicts the next merge (0.41.0)
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.41.0") // feature merge #2 on main: another minor (not advised, but kept)
+	h.checkout(feat)
+	h.merge("main")
+	h.want("0.42.0-reused.1") // back-merge counts as new work -> predicts main's next (0.42.0)
+
+	// --- Phase 3: reuse the feature, merge into develop, release develop into
+	// main, back-merge main into develop. ---
+	h.checkout(feat)
+	h.commit("f3")
+	h.want("0.42.0-reused.2") // already predicting 0.42.0; new work advances only the counter
+	h.checkout("develop")
+	h.merge(feat)
+	h.want("0.42.0-alpha.6") // feature merge into develop: minor over develop's section
+	h.checkout("main")
+	h.merge("develop")
+	h.want("0.42.0") // release develop into main
+	h.checkout("develop")
+	h.merge("main")
+	h.want("0.42.1-alpha.2") // develop builds on 0.42.0 (patch floor from the back-merge)
+
+	// --- Phase 4: reuse the feature once more, direct merge into main, then
+	// back-merge main into BOTH develop and the feature branch. ---
+	h.checkout(feat)
+	h.commit("f4")
+	h.want("0.42.0-reused.3") // predicts main's next; the already-released f3 work does not re-bump
+
+	h.checkout("main")
+	h.merge(feat)
+	h.want("0.43.0") // feature merge #3 on main: minor
+
+	// develop gained no new commits since its 0.42.1 state, and main's new 0.43.0
+	// release is NOT reachable from develop (no back-merge yet). An unrelated main
+	// advance must not change develop's version, so develop stays 0.42.1 — keeping
+	// the same develop commit reproducible regardless of main's churn.
+	h.checkout("develop")
+	h.want("0.42.1-alpha.2")
+
+	// Back-merge main into develop: develop now contains main's 0.43.0 release and
+	// gains a commit, so it tracks 0.43.0 with only a patch for its own section
+	// work -> 0.43.1. It must NOT jump to 0.44.0 by re-counting the phase-3
+	// feature-into-develop merge, which is a spent release boundary (0.42.0).
+	h.merge("main")
+	h.want("0.43.1-alpha.6")
+
+	// Back-merge main into the feature branch too: the back-merge counts as new
+	// work and predicts main's next merge (0.44.0).
+	h.checkout(feat)
+	h.merge("main")
+	h.want("0.44.0-reused.1")
+
+	// Final release of develop into main lands cleanly as a patch over 0.43.0.
+	h.checkout("main")
+	h.merge("develop")
+	h.want("0.43.1")
+}
+
+// TestForkOriginParentSelection verifies that a short-lived branch is versioned
+// relative to the permanent branch it was FORKED FROM — develop if it forked off
+// develop, main if it forked off main — independent of which permanent branch
+// exists or what is later back-merged into it.
+func TestForkOriginParentSelection(t *testing.T) {
+	t.Parallel()
+
+	// Forked from main while develop exists: versioned relative to MAIN. It must
+	// predict main's next release, not develop's.
+	t.Run("ForkedFromMainPredictsMain", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0") // develop and main both at 1.0.0
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.want("1.1.0-x.1") // predicts main's next (1.0.0 -> 1.1.0)
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("1.1.0") // confirms the prediction
+	})
+
+	// Forked from develop: versioned relative to DEVELOP.
+	t.Run("ForkedFromDevelopPredictsDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0")
+		h.newBranch("feature/y") // off develop
+		h.commit("fy1")
+		h.want("1.1.0-y.1") // predicts develop's next
+		h.checkout("develop")
+		h.merge("feature/y")
+		h.want("1.1.0-alpha.2")
+	})
+
+	// A back-merge of the OTHER permanent branch does not retarget: a branch
+	// forked from main that back-merges develop still predicts main.
+	t.Run("BackMergeDoesNotRetarget", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d1") // develop advances (unreleased)
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.want("0.2.0-x.1") // forked from main (0.1.0 root) -> predicts main 0.2.0
+		// Back-merge develop into the feature branch; parent stays main.
+		h.merge("develop")
+		h.want("0.2.0-x.2") // still predicting main's next, not retargeted to develop
+	})
+}
+
+// TestBranchUnchangedWhenIdleWhileMainMoves verifies the "no new commits -> no
+// version change" rule for develop: develop does not change its version just
+// because a merge happened on main. It only picks up main's new release once it
+// actually merges it in (which is itself a new commit on develop). The
+// short-lived-branch analogue is TestNonDevelopBranchUnaffectedByUnrelatedMain.
+func TestBranchUnchangedWhenIdleWhileMainMoves(t *testing.T) {
+	t.Parallel()
+
+	// develop idle while a feature is merged directly into main.
+	t.Run("DevelopIdle", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0")
+		h.checkout("develop")
+		h.want("1.0.0-alpha.1") // develop at the release
+		// A feature merged directly into main advances main to 1.1.0.
+		h.checkout("main")
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.checkout("main")
+		h.merge("feature/x")
+		h.want("1.1.0")
+		// develop gained no commits of its own: unchanged.
+		h.checkout("develop")
+		h.want("1.0.0-alpha.1")
+		// Only once develop back-merges main (a new develop commit) does it pick
+		// up main's release.
+		h.merge("main")
+		h.want("1.1.1-alpha.2")
+	})
+
+	// A hotfix released directly on main does NOT advance develop until develop
+	// actually back-merges it: an unrelated main commit must not change develop's
+	// version (so a given develop commit stays reproducible). develop reflects
+	// only its own work until the hotfix is reachable.
+	t.Run("UnrelatedMainHotfixDoesNotAdvanceDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0")
+		// Minor hotfix released directly on main (not back-merged) -> 1.1.0.
+		h.checkout("main")
+		h.newBranch("feature/hot")
+		h.commit("fh1")
+		h.checkout("main")
+		h.merge("feature/hot")
+		h.want("1.1.0")
+		// develop makes its own patch commit. main's 1.1.0 is NOT reachable from
+		// develop (no back-merge), so develop reports only its own patch: 1.0.1.
+		h.checkout("develop")
+		h.commit("d1")
+		h.want("1.0.1-alpha.1")
+		// After a real back-merge of main, develop picks up the hotfix release.
+		h.merge("main")
+		h.want("1.1.1-alpha.3")
+	})
+}
+
+// TestNonDevelopBranchUnaffectedByUnrelatedMain verifies that a non-main,
+// non-develop branch follows the same reachability rule as develop: unrelated
+// work landing on main does NOT change the branch's version (so a given branch
+// commit stays reproducible), and the branch only picks up main's new release
+// once it actually back-merges main.
+func TestNonDevelopBranchUnaffectedByUnrelatedMain(t *testing.T) {
+	t.Parallel()
+
+	// Main-based flow (no develop): a feature forked from main, then an unrelated
+	// hotfix lands on main. The feature's version must not change.
+	t.Run("MainFlowUnrelatedHotfix", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("1.0.0", mustHead(t, h))
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.want("1.1.0-x.1") // predicts main's next (feature minor over 1.0.0)
+
+		// Unrelated hotfix released directly on main (not merged into feature/x).
+		h.checkout("main")
+		h.newBranch("hotfix/u")
+		h.commit("hf1")
+		h.checkout("main")
+		h.merge("hotfix/u")
+		h.want("1.0.1")
+
+		// feature/x is unchanged: main's 1.0.1 is not reachable from it.
+		h.checkout("feature/x")
+		h.want("1.1.0-x.1")
+
+		// After a real back-merge of main, the branch picks up main's release and
+		// advances (its minor now rides on 1.0.1 -> 1.1.0, plus the merge commit).
+		h.merge("main")
+		h.want("1.1.0-x.2")
+	})
+
+	// Develop-based flow: a feature forked from develop, with an unrelated hotfix
+	// released directly on main. The feature's version must not change until it
+	// (or develop) actually contains the hotfix.
+	t.Run("DevelopFlowUnrelatedHotfix", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0")
+		h.newBranch("feature/x")
+		h.commit("f1")
+		h.want("1.1.0-x.1") // predicts develop's next
+
+		// Unrelated hotfix on main (not back-merged anywhere).
+		h.checkout("main")
+		h.newBranch("hotfix/u")
+		h.commit("hf1")
+		h.checkout("main")
+		h.merge("hotfix/u")
+		h.want("1.0.1")
+
+		// feature/x unchanged: the hotfix is not in its history.
+		h.checkout("feature/x")
+		h.want("1.1.0-x.1")
+
+		// Back-merging main into the feature branch brings the hotfix in, so it
+		// advances to reflect main's released core.
+		h.merge("main")
+		h.want("1.1.0-x.2")
+	})
+}
+
+// TestReleaseMergeNeverRegressesMain verifies that merging develop into main
+// never LOWERS main's version, even when main advanced independently of develop
+// (a hotfix released directly on main that develop never back-merged).
+//
+// Note the develop branch itself still reports its OWN accumulated core (not
+// main's unreleased hotfix) until it actually back-merges main: an unrelated
+// commit on main must not change develop's version, so a given develop commit
+// stays reproducible. The no-regression guarantee is a merge-time property on
+// main, independent of what develop displays beforehand.
+func TestReleaseMergeNeverRegressesMain(t *testing.T) {
+	t.Parallel()
+
+	// Minor hotfix on main (1.1.0), develop has an independent patch. Releasing
+	// develop must leave main at 1.1.0 (not regress to develop's own 1.0.1).
+	t.Run("MinorHotfixThenReleaseDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0")
+		h.checkout("main")
+		h.newBranch("feature/hot")
+		h.commit("fh1")
+		h.checkout("main")
+		h.merge("feature/hot")
+		h.want("1.1.0")
+
+		h.checkout("develop")
+		h.commit("d1")
+		h.want("1.0.1-alpha.1") // develop's own core; main's unmerged hotfix does not advance it
+
+		// The release merge publishes develop's work but never regresses main: it
+		// stays at 1.1.0 (max of develop's 1.0.1 and main's 1.1.0).
+		h.checkout("main")
+		h.merge("develop")
+		h.want("1.1.0")
+	})
+
+	// Major hotfix on main (2.0.0), develop has a patch. Same no-regression
+	// guarantee at the major level: main stays 2.0.0.
+	t.Run("MajorHotfixThenReleaseDevelop", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("1.0.0")
+		h.checkout("main")
+		h.newBranch("hotfix/big")
+		h.commit("breaking +semver: major")
+		h.checkout("main")
+		h.merge("hotfix/big")
+		h.want("2.0.0")
+
+		h.checkout("develop")
+		h.commit("d1")
+		h.want("1.0.1-alpha.1") // develop's own core; main's unmerged major does not advance it
+
+		h.checkout("main")
+		h.merge("develop")
+		h.want("2.0.0") // no regression to develop's own 1.0.1
+	})
+}
+
+// TestRepeatedBugfixReuse is the non-feature (bugfix/) analogue of
+// TestBackMergeKeepsFeatureCoreAtLeastMainCore: a bugfix branch that is NOT
+// deleted and is merged into the integration branch multiple times, with and
+// without back-merges. It follows the same "upcoming core" rules as a feature
+// branch, except it bumps PATCH instead of minor.
+func TestRepeatedBugfixReuse(t *testing.T) {
+	t.Parallel()
+
+	// Main-based flow: each bugfix merge into main bumps patch; the branch
+	// predicts main's next patch, a back-merge counts as new work, and the
+	// commit used for a prior merge is spent (no re-bump).
+	t.Run("MainFlow", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("0.39.5", mustHead(t, h))
+
+		const bug = "bugfix/x"
+		h.newBranch(bug)
+		h.commit("b1")
+		h.want("0.39.6-x.1") // predicts main's first patch (0.39.5 -> 0.39.6)
+
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.39.6")
+		h.checkout(bug)
+		h.want("0.39.6-x.0") // sitting on the released boundary: spent, no re-bump
+
+		// Back-merge counts as new work -> predicts main's next patch.
+		h.merge("main")
+		h.want("0.39.7-x.1")
+
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.39.7") // the predicted patch
+		h.checkout(bug)
+		h.merge("main")
+		h.want("0.39.8-x.1") // back-merge again predicts the next patch
+
+		// Real new branch work keeps predicting the next patch.
+		h.checkout(bug)
+		h.commit("b2")
+		h.want("0.39.8-x.2")
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.39.8")
+	})
+
+	// Develop flow: a bugfix reused into develop stays at develop's single
+	// accumulated patch for the cycle (no per-merge re-bump), mirroring the
+	// feature-into-develop behavior but at patch level.
+	t.Run("DevelopFlow", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("0.39.5")
+
+		const bug = "bugfix/x"
+		h.newBranch(bug)
+		h.commit("b1")
+		h.want("0.39.6-x.1") // predicts develop's next patch
+		h.checkout("develop")
+		h.merge(bug)
+		h.want("0.39.6-alpha.2")
+
+		// Reuse: new work does not bump develop's core again within the cycle.
+		h.checkout(bug)
+		h.commit("b2")
+		h.want("0.39.6-x.2")
+		h.checkout("develop")
+		h.merge(bug)
+		h.want("0.39.6-alpha.4")
+	})
+}
+
+// TestFeatureMergedIntoBugfixCarriesMinor covers merging a feature/ branch INTO
+// a bugfix/ branch AFTER the bugfix was already merged into the integration
+// branch. The feature merge elevates the bugfix's bump from patch to MINOR, so
+// the bugfix core jumps to the minor level and carries that minor to the target
+// when merged.
+//
+// Both subtests also answer how followup work and merges AFTER that behave, and
+// the two flows differ:
+//
+//   - MainFlow: each merge into main bumps per-merge, so the minor-carrying merge
+//     creates a released boundary. Later plain bugfix work reverts to a PATCH over
+//     the new (minor) release — the one-time feature-minor is not re-applied.
+//   - DevelopFlow: develop accumulates once per release cycle, so after the minor
+//     is in develop, followup bugfix work STAYS at the minor level (no revert to
+//     patch) until a release to main resets the cycle; only then does develop
+//     resume with a patch.
+func TestFeatureMergedIntoBugfixCarriesMinor(t *testing.T) {
+	t.Parallel()
+
+	t.Run("MainFlow", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.tag("0.39.5", mustHead(t, h))
+
+		const bug = "bugfix/x"
+		h.newBranch(bug)
+		h.commit("b1")
+		h.want("0.39.6-x.1") // bugfix predicts a patch
+
+		// Merge the bugfix into main (0.39.6), but keep the branch around.
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.39.6")
+
+		// A feature branch is merged INTO the bugfix branch. The feature merge
+		// inside the bugfix elevates its bump from patch to minor.
+		h.checkout("main")
+		h.newBranch("feature/y")
+		h.commit("fy1")
+		h.want("0.40.0-y.1")
+		h.checkout(bug)
+		h.merge("feature/y")
+		h.want("0.40.0-x.2") // bugfix now carries a MINOR (feature merge elevates it)
+
+		// Merging the bugfix into main carries that minor to the target.
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.40.0")
+
+		// Followup: plain bugfix work after the minor-carrying release. The
+		// feature minor was spent in 0.40.0; the released bugfix tip is now a
+		// boundary, so new plain work reverts to a PATCH over 0.40.0.
+		h.checkout(bug)
+		h.commit("b2")
+		h.want("0.40.1-x.1") // patch over the new 0.40.0 release, counter reset
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.40.1")
+
+		// A second followup merge (no new work since the b2 merge) does not
+		// re-bump; a back-merge then predicts the next patch, consistent with the
+		// reuse rules.
+		h.checkout(bug)
+		h.want("0.40.1-x.0") // sitting on the released b2 boundary: spent
+		h.merge("main")
+		h.want("0.40.2-x.1") // back-merge counts as new work -> predicts next patch
+		h.checkout("main")
+		h.merge(bug)
+		h.want("0.40.2")
+	})
+
+	t.Run("DevelopFlow", func(t *testing.T) {
+		t.Parallel()
+		h := newHarness(t)
+		h.commit("c0")
+		h.newBranch("develop")
+		h.commit("d0")
+		h.release("0.39.5")
+
+		const bug = "bugfix/x"
+		h.newBranch(bug)
+		h.commit("b1")
+		h.want("0.39.6-x.1") // bugfix predicts a patch
+		h.checkout("develop")
+		h.merge(bug)
+		h.want("0.39.6-alpha.2")
+
+		// Feature branch (off the bugfix) merged INTO the bugfix elevates it to
+		// minor; develop then carries that minor.
+		h.checkout(bug)
+		h.newBranch("feature/y")
+		h.commit("fy1")
+		h.want("0.40.0-y.2")
+		h.checkout(bug)
+		h.merge("feature/y")
+		h.want("0.40.0-x.3") // bugfix carries a MINOR
+		h.checkout("develop")
+		h.merge(bug)
+		h.want("0.40.0-alpha.5") // develop carries the minor
+
+		// Followup: unlike the main flow, develop accumulates per cycle. No new
+		// release boundary was created, so followup bugfix work STAYS at the minor
+		// level (0.40.0), not reverting to patch.
+		h.checkout(bug)
+		h.commit("b2")
+		h.want("0.40.0-x.4")
+		h.checkout("develop")
+		h.merge(bug)
+		h.want("0.40.0-alpha.7")
+
+		// A release to main resets the cycle; after back-merging the release,
+		// develop resumes with a patch over 0.40.0.
+		h.checkout("main")
+		h.merge("develop")
+		h.want("0.40.0")
+		h.checkout("develop")
+		h.merge("main")
+		h.want("0.40.1-alpha.3")
 	})
 }
 
@@ -1568,7 +2332,7 @@ func TestMultipleMainCommits(t *testing.T) {
 		h.want("0.1.3")
 
 		h.checkout("develop")
-		h.want("0.1.1-alpha.1")
+		h.want("0.1.1-alpha.1") // develop has no new commits since the release; unchanged by main's hotfixes
 		h.backMerge()           // pulls the two hotfixes (and their boundaries) onto develop
 		h.want("0.1.4-alpha.1") // builds on the 0.1.3 hotfix boundary; only the merge above it
 	})
@@ -3053,7 +3817,7 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.merge("feature/cool-abc") // "Merge branch 'feature/cool-abc'"
 		h.want("0.2.0")             // minor bumped ONCE (not once per feature commit)
 		h.checkout("develop")
-		h.want("0.1.0-alpha.0")
+		h.want("0.1.0-alpha.0") // develop has no new commits; unchanged by the main merge
 		h.backMerge()
 		// The feature merge that produced main's 0.2.0 is a published release
 		// point on main's own first-parent chain; its minor is already baked into
@@ -3083,7 +3847,7 @@ func TestDirectMergeIntoMain(t *testing.T) {
 		h.merge("feat/cool-abc") // "Merge branch 'feat/cool-abc'"
 		h.want("0.2.0")          // minor bumped ONCE via the feat/ merge
 		h.checkout("develop")
-		h.want("0.1.0-alpha.0")
+		h.want("0.1.0-alpha.0") // develop has no new commits; unchanged by the main merge
 		h.backMerge()
 		// As with "feature/", the "feat/" merge on main is a spent release point:
 		// its minor is baked into 0.2.0 and is not re-applied on the back-merge.

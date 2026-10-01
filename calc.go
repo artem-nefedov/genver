@@ -11,6 +11,11 @@ import (
 	"github.com/go-git/go-git/v5/plumbing/object"
 )
 
+// developBranch is the name of the permanent integration branch in the supported
+// git-flow: short-lived branches integrate into it (when it exists), and it is
+// versioned as "a.b.c-alpha.N".
+const developBranch = "develop"
+
 // result is a computed version, split so the --format flag can render
 // individual components (base, prerelease tail, major/minor/patch, branch).
 type result struct {
@@ -63,7 +68,26 @@ type calculator struct {
 	// suppressing it there would DROP the bump.
 	releasedMainMerges map[plumbing.Hash]bool
 
+	// mainCoreCache memoizes mainVersion results by commit hash. mainVersion is
+	// the hot path for a long main chain (each merge triggers a section scan), and
+	// it is now also consulted by reachableReleaseFloor to floor develop/branch
+	// cores at main's true released core. Caching keeps that extra consult free.
+	mainCoreCache map[plumbing.Hash]mainCoreResult
+
+	// mainTipHash / mainTipCore cache main's own tip commit and its released core,
+	// computed for free by developBoundaries' forward pass. reachableReleaseFloor
+	// uses them to floor develop/branch cores at main's true core without an
+	// extra mainVersion walk when main's tip is reachable from the branch.
+	mainTipHash plumbing.Hash
+	mainTipCore core
+
 	trace io.Writer // nil disables tracing
+}
+
+// mainCoreResult is a memoized mainVersion return value.
+type mainCoreResult struct {
+	core    core
+	vPrefix bool
 }
 
 // msgBump returns the "+semver:" bump encoded in a commit's message, memoized by
@@ -273,10 +297,12 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 		}
 		if c.isDevelopReleaseMerge(cm) {
 			// Release merge from develop: the core is develop's core at the
-			// merged tip, built on the boundaries registered so far. A
-			// "+semver:" directive on the release-merge commit itself raises the
-			// bump level (via max) just as it would on any other commit.
-			dc, derr := c.developReleaseCore(p, c.msgBump(cm))
+			// merged tip, built on the boundaries registered so far, floored at
+			// the running main core so a release never REGRESSES main (matching
+			// mainVersion). Flooring here keeps the forward pass — and thus the
+			// captured c.mainTipCore — consistent with mainVersion. A "+semver:"
+			// directive on the release-merge commit itself raises the bump level.
+			dc, derr := c.developReleaseCoreFloored(p, c.msgBump(cm), cur)
 			if derr != nil {
 				return nil, derr
 			}
@@ -292,6 +318,13 @@ func (c *calculator) developBoundaries() ([]boundary, error) {
 		}
 		add(p, cur, plumbing.ZeroHash)
 	}
+
+	// cur is now main's released core at its tip, computed for free by this
+	// forward pass. Capture it (and the tip hash) so reachableReleaseFloor can
+	// floor develop/branch cores at main's true core WITHOUT re-walking main via
+	// mainVersion — critical for performance on long main chains.
+	c.mainTipHash = mainCommit.Hash
+	c.mainTipCore = cur
 
 	return c.boundaries, nil
 }
@@ -756,6 +789,15 @@ func firstParentChainContains(start, target plumbing.Hash, pool map[plumbing.Has
 // branch must INHERIT the merge's bump, so it is counted normally. Suppressing it
 // unconditionally would drop the bump (e.g. a "+semver: major" merge on main
 // merged into a feature branch forked at 0.39.5 would collapse 1.0.0 -> 0.40.0).
+//
+// The same reasoning applies to a commit that is ITSELF a registered release
+// boundary (e.g. a develop tip that was released into main): its work is already
+// published at its boundary core, so when the section builds on an equal-or-higher
+// base that core is already absorbed and the commit's bump must not be re-counted.
+// This is the develop-side analogue of releasedMainMerges — a feature merge made
+// into develop and then released stays a boundary on develop's chain, and merging
+// a higher main release back into develop must not re-apply that spent minor
+// (0.42.1 -> 0.44.0 instead of tracking main's 0.43.x).
 func (c *calculator) explicitCommitBump(commit *object.Commit, baseCore core) (bumpKind, error) {
 	if c.releasedMainMerges[commit.Hash] {
 		if mc, ok, _, err := c.mergeBoundary(commit); err != nil {
@@ -767,6 +809,11 @@ func (c *calculator) explicitCommitBump(commit *object.Commit, baseCore core) (b
 		}
 		// Produced core is above the base: the section has not absorbed it yet, so
 		// fall through and count the merge's bump so the section inherits it.
+	}
+	// A commit that is itself a release boundary is already-published work; if the
+	// section's base is at or above that boundary's core, its bump is spent.
+	if bcore, ok := c.isBoundary(commit); ok && !less(baseCore, bcore) {
+		return bumpNone, nil
 	}
 	b := c.msgBump(commit)
 	if isFeatureMerge(commit) {
@@ -969,10 +1016,49 @@ func (c *calculator) developReleaseCore(tip *object.Commit, extraBump bumpKind) 
 	return out, nil
 }
 
+// developReleaseCoreFloored computes a develop->main release core (as
+// developReleaseCore) and floors it at main's running core so the release never
+// REGRESSES main. When main advanced independently of develop (e.g. a hotfix
+// released directly on main that develop never back-merged), develop's
+// accumulated core can be below main's; publishing develop must still leave main
+// at least where it was. The result is therefore max(developCore, floor): a
+// release merge publishes develop's accumulated core, but never lowers main. In
+// the common case develop's base IS main's last release so developCore >= floor
+// and this is just develop's core.
+func (c *calculator) developReleaseCoreFloored(tip *object.Commit, extraBump bumpKind, floor core) (core, error) {
+	dc, err := c.developReleaseCore(tip, extraBump)
+	if err != nil {
+		return core{}, err
+	}
+	if less(dc, floor) {
+		c.logf("develop: release-merge core %s below main %s; floored to main (no regression)", dc, floor)
+		return floor, nil
+	}
+	return dc, nil
+}
+
 // mainVersion computes the release core for a commit on the main branch, plus
 // whether the base tag it builds on is "v"-prefixed (so the caller can default
 // the output spelling to it).
 func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
+	if c.mainCoreCache != nil {
+		if r, ok := c.mainCoreCache[head.Hash]; ok {
+			return r.core, r.vPrefix, nil
+		}
+	}
+	cr, vpre, err := c.mainVersionUncached(head)
+	if err != nil {
+		return core{}, false, err
+	}
+	if c.mainCoreCache == nil {
+		c.mainCoreCache = map[plumbing.Hash]mainCoreResult{}
+	}
+	c.mainCoreCache[head.Hash] = mainCoreResult{core: cr, vPrefix: vpre}
+	return cr, vpre, nil
+}
+
+// mainVersionUncached is the body of mainVersion without memoization.
+func (c *calculator) mainVersionUncached(head *object.Commit) (core, bool, error) {
 	chain, err := c.g.firstParentChain(head)
 	if err != nil {
 		return core{}, false, err
@@ -1021,7 +1107,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 			if err != nil {
 				return core{}, false, err
 			}
-			dc, err := c.developReleaseCore(p, c.msgBump(cm))
+			dc, err := c.developReleaseCoreFloored(p, c.msgBump(cm), cur)
 			if err != nil {
 				return core{}, false, err
 			}
@@ -1053,7 +1139,7 @@ func (c *calculator) mainVersion(head *object.Commit) (core, bool, error) {
 // behavior for repositories whose merge commits genver cannot attribute.
 func (c *calculator) isDevelopReleaseMerge(cm *object.Commit) bool {
 	name := mergedBranchName(cm)
-	return name == "" || name == "develop"
+	return name == "" || name == developBranch
 }
 
 // directMergeCore computes the release core after a direct merge of a
@@ -1136,24 +1222,77 @@ func (c *calculator) directMergeCore(cm *object.Commit, base core) (core, error)
 	return scan.core(bumpNone), nil
 }
 
-// integrationBranch returns the tip and name of the branch that short-lived
-// branches integrate into: the permanent "develop" branch when it exists,
-// otherwise the main branch (the flow where short-lived branches are created
-// directly off main). This is what a non-main, non-develop branch is versioned
-// relative to.
-func (c *calculator) integrationBranch() (*object.Commit, string, error) {
-	developTip, err := c.g.branchCommit("develop")
+// integrationBranchFor selects the integration branch (parent) a specific branch
+// head is versioned relative to, based on WHERE THE BRANCH WAS FORKED FROM: a
+// branch forked off main integrates back into main; a branch forked off develop
+// integrates into develop. This is determined structurally and is fixed for the
+// life of the branch — a later back-merge of the OTHER permanent branch does not
+// retarget it.
+//
+// Detection walks head's OWN first-parent line (Parent(0) edges only) and takes
+// the first commit that lies on a permanent branch's mainline: if that commit is
+// on develop's first-parent chain the parent is develop; if it is on main's
+// chain but not develop's, the parent is main. (A commit reachable only through a
+// merge's second parent — e.g. a back-merged permanent branch — is not on head's
+// own line and is ignored.) When no develop branch exists, the parent is always
+// main. When the fork origin cannot be attributed to either mainline (unrelated
+// history), it falls back to the develop branch (the integration branch when it
+// exists).
+func (c *calculator) integrationBranchFor(head *object.Commit) (*object.Commit, string, error) {
+	developTip, err := c.g.branchCommit(developBranch)
 	if err != nil {
 		return nil, "", err
 	}
-	if developTip != nil {
-		return developTip, "develop", nil
-	}
-	mainCommit, name, err := c.g.mainBranch()
+	mainCommit, mainName, err := c.g.mainBranch()
 	if err != nil {
 		return nil, "", err
 	}
-	return mainCommit, name, nil
+	// No develop: short-lived branches always integrate into main.
+	if developTip == nil {
+		return mainCommit, mainName, nil
+	}
+
+	developChain, err := c.g.firstParentChain(developTip)
+	if err != nil {
+		return nil, "", err
+	}
+	mainChain, err := c.g.firstParentChain(mainCommit)
+	if err != nil {
+		return nil, "", err
+	}
+	onDevelop := map[plumbing.Hash]bool{}
+	for _, cm := range developChain {
+		onDevelop[cm.Hash] = true
+	}
+	onMain := map[plumbing.Hash]bool{}
+	for _, cm := range mainChain {
+		onMain[cm.Hash] = true
+	}
+
+	// Walk head's own first-parent line directly (no full parent pool needed):
+	// the first commit found on a permanent mainline is the fork origin.
+	cur := head
+	for {
+		if onDevelop[cur.Hash] {
+			c.logf("other: fork origin %s is on develop's mainline -> parent = develop", short(cur.Hash))
+			return developTip, developBranch, nil
+		}
+		if onMain[cur.Hash] {
+			c.logf("other: fork origin %s is on main's mainline (not develop) -> parent = main", short(cur.Hash))
+			return mainCommit, mainName, nil
+		}
+		if cur.NumParents() == 0 {
+			break
+		}
+		p, perr := cur.Parent(0)
+		if perr != nil {
+			return nil, "", perr
+		}
+		cur = p
+	}
+	// Fork origin not attributable to either mainline: preserve prior behavior.
+	c.logf("other: fork origin not on a permanent mainline; defaulting to develop")
+	return developTip, developBranch, nil
 }
 
 // permanentMainlineWalls returns the set of commit hashes on the first-parent
@@ -1165,7 +1304,7 @@ func (c *calculator) integrationBranch() (*object.Commit, string, error) {
 // branch's counter, regardless of which permanent branch was merged in.
 func (c *calculator) permanentMainlineWalls() (map[plumbing.Hash]bool, error) {
 	walls := map[plumbing.Hash]bool{}
-	developTip, err := c.g.branchCommit("develop")
+	developTip, err := c.g.branchCommit(developBranch)
 	if err != nil {
 		return nil, err
 	}
@@ -1186,6 +1325,46 @@ func (c *calculator) permanentMainlineWalls() (map[plumbing.Hash]bool, error) {
 		}
 	}
 	return walls, nil
+}
+
+// ownLineBoundary returns the highest release boundary that sits on head's OWN
+// first-parent line (walking only Parent(0) edges), and whether one was found.
+//
+// Such a boundary is one of the branch's OWN commits that has already been
+// merged into — and released by — the integration branch (in the main-based
+// flow, every feature merge on main registers its released tip, which is the
+// branch commit, as a boundary). It represents the branch's prior contribution
+// that is already published, so the branch should build its NEXT version on this
+// boundary's core and re-assert its bump only for work done AFTER it — exactly
+// mirroring how a reused branch predicts the integration branch's next state:
+// the commit used for the previous merge is "spent" (no re-bump), while new work
+// since that merge advances the core again. Boundaries that entered head only
+// through a merge's second parent (e.g. a back-merged integration branch, or a
+// sibling branch merged in) are NOT on the own line and are ignored here.
+func (c *calculator) ownLineBoundary(head plumbing.Hash, pool map[plumbing.Hash][]plumbing.Hash) (*object.Commit, core, bool, error) {
+	var bestCore core
+	var bestHash plumbing.Hash
+	found := false
+	for h := head; ; {
+		if i, ok := c.boundaryAt[h]; ok {
+			if bc := c.boundaries[i].core; !found || less(bestCore, bc) {
+				bestCore, bestHash, found = bc, h, true
+			}
+		}
+		parents, ok := pool[h]
+		if !ok || len(parents) == 0 {
+			break
+		}
+		h = parents[0]
+	}
+	if !found {
+		return nil, core{}, false, nil
+	}
+	commit, err := c.g.r.CommitObject(bestHash)
+	if err != nil {
+		return nil, core{}, false, err
+	}
+	return commit, bestCore, true, nil
 }
 
 // forkBase returns the commit on the integration branch's first-parent chain
@@ -1268,7 +1447,7 @@ func (c *calculator) forkBase(head, integrationTip *object.Commit) (*object.Comm
 // pull the core down as well as up, but never below the release boundary the
 // branch builds on; a tag whose anchor is below that boundary is ignored.
 func (c *calculator) otherVersion(head *object.Commit, branch string) (core, string, int, bool, error) {
-	integrationTip, integration, err := c.integrationBranch()
+	integrationTip, integration, err := c.integrationBranchFor(head)
 	if err != nil {
 		return core{}, "", 0, false, err
 	}
@@ -1291,6 +1470,7 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	var belowCore core
 	baseVPrefix := false
 	sectionBump := bumpNone
+	atOwnBoundary := false // head sits exactly at its own already-released boundary
 	if bcore, ok := c.isBoundary(mb); ok {
 		if err := c.boundaryConflictAt(mb.Hash); err != nil {
 			return core{}, "", 0, false, err
@@ -1320,6 +1500,33 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 		baseVPrefix = scan.baseVPrefix
 		sectionBump = scan.bump
 		c.logf("other: %s section starts at %s (%s); %s section bump = %s", integration, short(scan.baseHash), scan.baseCore, integration, sectionBump)
+	}
+
+	// If the branch has already been merged into (and released by) the
+	// integration branch, one of its OWN commits sits on head's first-parent line
+	// as a release boundary. The branch should then build its next version on that
+	// boundary's (higher) core, re-asserting its bump only for work done AFTER it:
+	// this makes a reused branch predict the integration branch's NEXT state
+	// (e.g. a feature re-merged into main after main reached 1.1.0 shows 1.2.0
+	// once it has new work), while the exact commit used for the previous merge
+	// does not re-bump (no new work -> the branch stays at the released core).
+	// Rebasing onto this boundary re-scopes the section (mb..head) below so the
+	// counter and bump cover only the branch's post-merge work.
+	if olc, olCore, ok, err := c.ownLineBoundary(head.Hash, pool); err != nil {
+		return core{}, "", 0, false, err
+	} else if ok && less(belowCore, olCore) {
+		if err := c.boundaryConflictAt(olc.Hash); err != nil {
+			return core{}, "", 0, false, err
+		}
+		c.logf("other: branch's own merged boundary %s (%s) is higher than %s; rebasing onto it", short(olc.Hash), olCore, belowCore)
+		mb = olc
+		belowCore = olCore
+		baseVPrefix = c.boundaryVPrefixAt(olc.Hash)
+		sectionBump = bumpNone
+		// When head IS this boundary, the branch sits exactly at its last merged
+		// (and released) state with no new work: the merge is spent, so the branch
+		// keeps the released core without re-asserting its type floor.
+		atOwnBoundary = olc.Hash == head.Hash
 	}
 
 	// The branch's own commits (reachable from head but not from the fork point)
@@ -1368,7 +1575,12 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	n := cs.count
 	c.logf("other: branch's own commits bump = %s", rs.bump)
 	eff := max(sectionBump, rs.bump)
-	if isFeatureBranch(branch) {
+	if atOwnBoundary {
+		// No new work since the branch's own merge was released: keep the released
+		// core, do not re-apply the branch's type floor (the merge is spent).
+		eff = bumpNone
+		c.logf("other: head is the branch's own released boundary; no new work, floor suppressed")
+	} else if isFeatureBranch(branch) {
 		eff = max(eff, bumpMinor) // feature increment takes precedence
 		c.logf("other: feature branch -> effective bump forced to at least minor")
 	} else {
@@ -1378,6 +1590,23 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 
 	out := belowCore.bump(eff)
 	c.logf("other: effective bump = %s; %d commit(s) since fork point; core %s -> %s", eff, n, belowCore, out)
+
+	// The branch is floored at the highest release it ACTUALLY CONTAINS
+	// (reachable from head): once the integration branch is merged back INTO it
+	// ("git merge main" / "git merge develop"), that branch's releases become
+	// reachable and raise the floor — e.g. a branch repeatedly merged into main
+	// and back keeps pace with main's advancing core. The floor is
+	// reachability-based, never main's live tip: unrelated work landing on main
+	// that the branch has NOT merged in does not change its version, so a given
+	// branch commit stays reproducible regardless of main's churn.
+	relCore, ok, err := c.reachableReleaseFloor(head, pool)
+	if err != nil {
+		return core{}, "", 0, false, err
+	}
+	if ok && less(out, relCore) {
+		c.logf("other: core %s floored at reachable release %s", out, relCore)
+		out = relCore
+	}
 
 	// A prerelease reference tag among the branch's own commits (mb..head)
 	// anchors the version to the tag's core, continuing the tag's label and
@@ -1429,6 +1658,77 @@ func (c *calculator) otherVersion(head *object.Commit, branch string) (core, str
 	return out, "", n, baseVPrefix, nil
 }
 
+// reachableReleaseFloor returns the release core that floors the branch at head,
+// and whether any floor applies. The floor is the highest release the branch
+// actually has IN ITS OWN HISTORY (reachable from head):
+//
+//   - every registered release boundary reachable within pool, and
+//   - main's released core at the newest main first-parent commit reachable from
+//     head (recovering a release that advanced main's core via a merge whose
+//     released tip coincides with an already-registered boundary — e.g. the same
+//     feature branch merged into main more than once).
+//
+// Crucially the floor is REACHABILITY-based, never main's live tip: a release
+// only floors a branch once that release is in the branch's history (which only
+// happens when the branch gains a commit — a merge of the integration branch).
+// This keeps the invariant "a branch's version changes only when the branch
+// itself gains commits": a release published on main while the branch sits idle
+// is not reachable from the branch and does not change its version. Once the
+// branch merges it in (a new commit), it becomes reachable and floors the branch.
+//
+// c.mainTipCore (computed for free by developBoundaries) is used on the fast path
+// when main's own tip is reachable; otherwise mainVersion is consulted (memoized)
+// for the newest reachable main commit. (Reference-tag anchors may still pull a
+// branch down, but never below this floor.)
+func (c *calculator) reachableReleaseFloor(head *object.Commit, pool map[plumbing.Hash][]plumbing.Hash) (core, bool, error) {
+	var best core
+	found := false
+	for i := range c.boundaries {
+		b := &c.boundaries[i]
+		if _, reachable := pool[b.commit.Hash]; !reachable {
+			continue
+		}
+		if !found || less(best, b.core) {
+			best = b.core
+			found = true
+		}
+	}
+
+	// Fast path: main's own tip reachable -> use the cached tip core.
+	if !c.mainTipHash.IsZero() {
+		if _, reachable := pool[c.mainTipHash]; reachable {
+			if !found || less(best, c.mainTipCore) {
+				best = c.mainTipCore
+				found = true
+			}
+			return best, found, nil
+		}
+	}
+	// Otherwise consult mainVersion for the newest REACHABLE main commit.
+	mainCommit, _, err := c.g.mainBranch()
+	if err == nil && mainCommit != nil {
+		chain, cerr := c.g.firstParentChain(mainCommit) // newest first
+		if cerr != nil {
+			return core{}, false, cerr
+		}
+		for _, cm := range chain {
+			if _, reachable := pool[cm.Hash]; !reachable {
+				continue
+			}
+			mc, _, merr := c.mainVersion(cm)
+			if merr != nil {
+				return core{}, false, merr
+			}
+			if !found || less(best, mc) {
+				best = mc
+				found = true
+			}
+			break
+		}
+	}
+	return best, found, nil
+}
+
 // onFirstParentLine reports whether target lies on the first-parent chain walked
 // from head down to (but not past) stop — i.e. target is on "this branch's own"
 // mainline rather than on a side branch that was merged in. The walk follows
@@ -1475,11 +1775,40 @@ func (c *calculator) Calculate(branch string, head *object.Commit) (result, erro
 		c.logf("result: %s (release)", cr)
 		return result{core: cr, isMain: true, branch: branch, headHash: head.Hash, vPrefix: vpre}, nil
 
-	case "develop":
+	case developBranch:
 		c.logf("branch classified as develop")
 		cr, n, vpre, err := c.developVersion(head)
 		if err != nil {
 			return result{}, err
+		}
+		// develop shows the "upcoming core": the core main would have if develop
+		// were released into it right now. The release merge publishes develop's
+		// accumulated core but can only move main FORWARD, so the upcoming core is
+		// floored at the highest release develop ACTUALLY CONTAINS. The floor is
+		// REACHABILITY-based: main's work raises develop only once it is reachable
+		// from develop (brought in by a direct "main -> develop" back-merge). An
+		// unrelated commit landing on main must NOT change develop's version —
+		// otherwise the same develop commit would report different versions as main
+		// moves, which breaks reproducibility. (The real develop->main release
+		// merge separately floors main at its own core so it never regresses; that
+		// is a distinct, merge-time guarantee computed on main, not here.)
+		//
+		// The floor applies only once develop has advanced past its last release;
+		// while develop sits exactly on a release boundary it keeps that released
+		// core unchanged.
+		if _, atRelease := c.isBoundary(head); !atRelease {
+			pool, perr := c.g.parentPool(head.Hash)
+			if perr != nil {
+				return result{}, perr
+			}
+			relCore, ok, rerr := c.reachableReleaseFloor(head, pool)
+			if rerr != nil {
+				return result{}, rerr
+			}
+			if ok && less(cr, relCore) {
+				c.logf("develop: core %s floored at reachable release %s", cr, relCore)
+				cr = relCore
+			}
 		}
 		c.logf("result: %s-alpha.%d", cr, n)
 		return result{core: cr, prerelease: fmt.Sprintf("alpha.%d", n), branch: branch, headHash: head.Hash, vPrefix: vpre}, nil
